@@ -6,6 +6,8 @@
 .gh_token
 .gitee_token
 .render_token
+tokens.txt
+*tokens*.txt
 
 # Python
 __pycache__/
