@@ -1,0 +1,20 @@
+# ===== 核心后端 =====
+fastapi>=0.115.0
+uvicorn>=0.30.0
+websockets>=13.0
+
+# ===== 数据处理 =====
+pandas>=2.2.0
+numpy>=1.26.0
+
+# ===== 前端 / 可视化 =====
+# st.fragment(run_every=...) 需要 1.37+；width="stretch" 需要 1.49+
+streamlit>=1.49.0
+plotly>=5.24.0
+requests>=2.32.0
+
+# ===== 配置与工具 =====
+python-dotenv>=1.0.1
+
+# ===== 测试（可选，仅本地/CI 需要） =====
+pytest>=8.0.0

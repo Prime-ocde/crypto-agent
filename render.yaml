@@ -1,0 +1,31 @@
+# Render.com 蓝图：一键部署 FastAPI 后端（免费套餐足够课堂演示）
+# 用法：把仓库推到 GitHub → Render 新建 Blueprint → 选这个仓库
+services:
+  - type: web
+    name: crypto-grid-quant-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: RUN_MODE
+        value: live
+      - key: SYMBOLS
+        value: BTCUSDT,ETHUSDT
+      - key: INTERVALS
+        value: 1m,1d,1w
+      - key: BINANCE_WS_URL
+        value: wss://data-stream.binance.vision/ws
+      - key: BINANCE_WS_FALLBACKS
+        value: wss://stream.binance.com:9443/ws
+      - key: BINANCE_REST_URL
+        value: https://data-api.binance.vision
+      - key: BINANCE_REST_FALLBACK
+        value: https://api.binance.com
+      - key: FEE_RATE
+        value: "0.001"
+      - key: WS_IDLE_TIMEOUT
+        value: "30"
+      - key: PYTHON_VERSION
+        value: "3.12.6"
