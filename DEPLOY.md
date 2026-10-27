@@ -67,6 +67,20 @@ git push -u origin main
 
 ---
 
+## 2.5 自建后端（云服务器）
+
+没有信用卡、也不想用 Render 时：
+
+```bash
+# 香港/新加坡 Ubuntu 22.04，安全组放行 8000
+git clone --depth 1 https://github.com/Prime-ocde/crypto-agent.git
+cd crypto-agent
+sudo bash deploy/server/bootstrap.sh 8000 main
+```
+
+完成后把 `BACKEND_BASE_URL=http://<公网IP>:8000` 写入 Streamlit Cloud 的 Secrets 并 Reboot。
+大陆机房通常连不上 Binance，不建议。
+
 ## 3. 部署前端（Streamlit Community Cloud）
 
 1. <https://share.streamlit.io> → **New app** → 选同一个 GitHub 仓库；

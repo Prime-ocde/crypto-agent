@@ -392,6 +392,46 @@ powershell -ExecutionPolicy Bypass -File scripts\start_public_tunnel.ps1
 
 ![Streamlit Cloud 情绪与新闻](docs/screenshot_cloud_mood.png)
 
+### 10.5 自建后端（云服务器，推荐香港/新加坡）
+
+直连模式只缺「资金费 / 多空比」，要补齐就得有一个能访问 Binance 的后端进程。
+
+| 方案 | 费用 | 能否连 Binance | 备案 | 适合 |
+| --- | --- | --- | --- | --- |
+| Render Free | 0 元 | ✅（美国） | 不需要 | 有信用卡可绑 |
+| 香港/新加坡轻量 | ~¥30–60/月 | ✅ | 不需要 | 无信用卡、要稳定 |
+| 大陆轻量 | ~¥24–40/月 | ❌ 通常被墙 | 80/443 需备案 | 不推荐 |
+| Hugging Face Space | 0 元 | ✅ | 不需要 | 能打开 HF 网站 |
+
+**步骤（Ubuntu 22.04，2C2G 即可）**
+
+1. 购买香港/新加坡轻量服务器，安全组放行 **8000** 端口；
+2. SSH 登录后执行：
+
+   ```bash
+   git clone --depth 1 https://github.com/Prime-ocde/crypto-agent.git
+   cd crypto-agent
+   sudo bash deploy/server/bootstrap.sh 8000 main
+   ```
+
+   脚本会：装依赖 → 建 venv → 装 systemd 服务 → 开机自启 → 放行防火墙 → 自检 `/api/health`；
+3. 浏览器打开 `http://<服务器公网IP>:8000/api/health`，看到 `"status": "ok"` 即成功；
+4. Streamlit Cloud → 应用 → **Settings → Secrets** 填入：
+
+   ```toml
+   BACKEND_BASE_URL = "http://<服务器公网IP>:8000"
+   ```
+
+5. 点 **Reboot app**，前端状态条会从「Binance 直连」变成「🟢 后端实时」，情绪页的资金费/多空比随之出现。
+
+**更新代码**：
+
+```bash
+cd /opt/crypto-agent && sudo git pull && sudo systemctl restart crypto-agent-api
+```
+
+> 注意：大陆机房访问 `fapi.binance.com` / `stream.binance.com` 通常不通，后端会降级，所以选香港/新加坡。
+
 ## 11. 教室演示动线（3 分钟）
 
 1. 打开页面：状态条「后端实时 / 合约 10x / 策略」；
