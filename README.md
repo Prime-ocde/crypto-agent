@@ -382,6 +382,16 @@ powershell -ExecutionPolicy Bypass -File scripts\start_public_tunnel.ps1
 
 > Streamlit Cloud 免费实例在长时间无人访问后会休眠，首次打开唤醒约 20~40 秒。
 
+**已部署示例**：<https://crypto-agent-ac2s7gbjsf9iax8hyznvst.streamlit.app>
+
+- 实测：实时行情为 Binance 直连（最新价随行情变动），回测能跑出指标卡与成交分布；
+- 情绪页：恐惧贪婪指数与新闻为直连，资金费/多空比标注「需后端」；
+- 验收命令：`powershell -ExecutionPolicy Bypass -File scripts\deploy_check.ps1 -Frontend <地址>`。
+
+![Streamlit Cloud 云端回测](docs/screenshot_streamlit_cloud.png)
+
+![Streamlit Cloud 情绪与新闻](docs/screenshot_cloud_mood.png)
+
 ## 11. 教室演示动线（3 分钟）
 
 1. 打开页面：状态条「后端实时 / 合约 10x / 策略」；

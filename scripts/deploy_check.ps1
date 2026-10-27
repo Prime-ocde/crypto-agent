@@ -2,8 +2,10 @@
 # 用法：
 #   powershell -ExecutionPolicy Bypass -File scripts\deploy_check.ps1 `
 #     -Backend https://xxx.onrender.com -Frontend https://xxx.streamlit.app
+# 只部署了前端（直连模式）时，省略 -Backend 即可：
+#   powershell -ExecutionPolicy Bypass -File scripts\deploy_check.ps1 -Frontend https://xxx.streamlit.app
 param(
-    [Parameter(Mandatory = $true)][string]$Backend,
+    [string]$Backend = "",
     [Parameter(Mandatory = $true)][string]$Frontend
 )
 
@@ -31,27 +33,31 @@ function Test-Endpoint {
 }
 
 Write-Host ""
-Write-Host "=== 1. 后端接口 ===" -ForegroundColor Cyan
-$health = Test-Endpoint "health" "$Backend/api/health"
-if ($health) {
-    try {
-        $data = $health.Content | ConvertFrom-Json
-        Write-Host ("       mode={0} status={1} ws={2}" -f $data.mode, $data.status, $data.feed.connected) -ForegroundColor DarkGray
-    } catch { }
-}
-$config = Test-Endpoint "config" "$Backend/api/config"
-if ($config) {
-    try {
-        $data = $config.Content | ConvertFrom-Json
-        Write-Host ("       strategies={0} modes={1} intervals={2}" -f ($data.strategies.key -join ","), ($data.trading_modes -join ","), ($data.intervals -join ",")) -ForegroundColor DarkGray
-    } catch { }
-}
-Test-Endpoint "latest_data" "$Backend/api/latest_data?symbol=BTCUSDT&interval=1m&limit=5" | Out-Null
-Test-Endpoint "sentiment" "$Backend/api/sentiment" | Out-Null
-Test-Endpoint "news" "$Backend/api/news?limit=3" | Out-Null
+if (-not $Backend) {
+    Write-Host "=== 1. 后端接口（已跳过：未提供 -Backend，按直连模式验收） ===" -ForegroundColor DarkGray
+} else {
+    Write-Host "=== 1. 后端接口 ===" -ForegroundColor Cyan
+    $health = Test-Endpoint "health" "$Backend/api/health"
+    if ($health) {
+        try {
+            $data = $health.Content | ConvertFrom-Json
+            Write-Host ("       mode={0} status={1} ws={2}" -f $data.mode, $data.status, $data.feed.connected) -ForegroundColor DarkGray
+        } catch { }
+    }
+    $config = Test-Endpoint "config" "$Backend/api/config"
+    if ($config) {
+        try {
+            $data = $config.Content | ConvertFrom-Json
+            Write-Host ("       strategies={0} modes={1} intervals={2}" -f ($data.strategies.key -join ","), ($data.trading_modes -join ","), ($data.intervals -join ",")) -ForegroundColor DarkGray
+        } catch { }
+    }
+    Test-Endpoint "latest_data" "$Backend/api/latest_data?symbol=BTCUSDT&interval=1m&limit=5" | Out-Null
+    Test-Endpoint "sentiment" "$Backend/api/sentiment" | Out-Null
+    Test-Endpoint "news" "$Backend/api/news?limit=3" | Out-Null
 
-$body = '{"strategy":"grid","symbol":"BTCUSDT","interval":"1m","limit":100,"params":{"grid_count":10}}'
-Test-Endpoint "backtest" "$Backend/api/backtest" "POST" $body | Out-Null
+    $body = '{"strategy":"grid","symbol":"BTCUSDT","interval":"1m","limit":100,"params":{"grid_count":10}}'
+    Test-Endpoint "backtest" "$Backend/api/backtest" "POST" $body | Out-Null
+}
 
 Write-Host ""
 Write-Host "=== 2. 前端页面 ===" -ForegroundColor Cyan
