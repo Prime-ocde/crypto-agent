@@ -2,6 +2,10 @@
 .env
 .env.local
 *.key
+# 部署用的临时令牌（绝不入库）
+.gh_token
+.gitee_token
+.render_token
 
 # Python
 __pycache__/
