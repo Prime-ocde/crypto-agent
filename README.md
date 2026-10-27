@@ -361,6 +361,27 @@ powershell -ExecutionPolicy Bypass -File scripts\start_public_tunnel.ps1
 
 ---
 
+### 10.4 只部署前端（Streamlit Cloud，免后端 / 免绑卡）
+
+只想拿到一个永久公网地址时，可以只部署前端：
+
+1. <https://share.streamlit.io> → **New app** → 选 GitHub 仓库 `Prime-ocde/crypto-agent`；
+2. Main file path 填 `frontend/app.py`，Python 选 **3.12**；
+3. Secrets **留空**（不需要后端），直接 Deploy。
+
+前端会自动进入**直连模式**：由 Streamlit 服务端进程直接请求 Binance 公共 REST，
+降级顺序变为 `后端 → Binance 直连 → 本地缓存 → 合成行情`。
+
+| 能力 | 直连模式 |
+| --- | --- |
+| 实时 K 线 / 回测 / 三策略 / 合约 / 做空 | ✅ 全部可用 |
+| 情绪（恐惧贪婪指数） | ✅ alternative.me 直连 |
+| 资金费 / 多空比 | ❌ 需要后端（页面标注「需后端」） |
+| 新闻 | ✅ CoinDesk / Cointelegraph RSS 直连 |
+| 行情更新方式 | 2 秒轮询 REST（没有后端 WebSocket 推送） |
+
+> Streamlit Cloud 免费实例在长时间无人访问后会休眠，首次打开唤醒约 20~40 秒。
+
 ## 11. 教室演示动线（3 分钟）
 
 1. 打开页面：状态条「后端实时 / 合约 10x / 策略」；

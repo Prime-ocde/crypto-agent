@@ -18,7 +18,8 @@ import hashlib
 import json
 import os
 import sys
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -31,6 +32,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from core.direct_feed import fetch_klines as fetch_direct_klines_raw  # noqa: E402
+from core.news import merge_news, parse_rss  # noqa: E402
+from core.sentiment import composite_sentiment  # noqa: E402
 from core.strategy_registry import STRATEGIES, STRATEGY_KEYS  # noqa: E402
 from core.strategy_registry import run_backtest as run_strategy_backtest  # noqa: E402
 from core.synthetic import default_base_price, synthesize_candles  # noqa: E402
@@ -127,6 +131,64 @@ def fetch_news(base_url: str, limit: int = 8) -> dict | None:
         return None
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_direct_sentiment(symbol: str) -> dict | None:
+    """后端不可用时，前端进程直接取恐惧贪婪指数（资金费/多空比仍需后端）。"""
+    try:
+        response = requests.get(
+            "https://api.alternative.me/fng/",
+            params={"limit": 30, "format": "json"},
+            timeout=8.0,
+        )
+        response.raise_for_status()
+        payload = response.json().get("data") or []
+        history = [
+            {"t": int(item["timestamp"]) * 1000, "value": float(item["value"])}
+            for item in reversed(payload)
+        ]
+        if not history:
+            return None
+        result = composite_sentiment(fear_greed=history[-1]["value"])
+        result.update(
+            {
+                "symbol": symbol,
+                "history": history,
+                "offline": False,
+                "partial": True,
+                "source": "alternative.me（前端直连；资金费/多空比需后端）",
+                "updated_at": _iso_now(),
+            }
+        )
+        return result
+    except Exception:  # noqa: BLE001
+        return None
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_direct_news(limit: int = 8) -> dict | None:
+    """后端不可用时，前端进程直接聚合 CoinDesk / Cointelegraph RSS。"""
+    feeds = (
+        ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
+        ("Cointelegraph", "https://cointelegraph.com/rss"),
+    )
+    items: list[dict] = []
+    for source, url in feeds:
+        try:
+            response = requests.get(url, timeout=8.0)
+            response.raise_for_status()
+            items.extend(parse_rss(response.text, source))
+        except Exception:  # noqa: BLE001
+            continue
+    if not items:
+        return None
+    return {
+        "items": merge_news(items, limit),
+        "offline": False,
+        "source": "CoinDesk / Cointelegraph RSS（前端直连）",
+        "updated_at": _iso_now(),
+    }
+
+
 def load_local_candles(symbol: str, interval: str, limit: int) -> list[dict]:
     """读取后端预热时落盘的 CSV（断网兜底）。"""
     path = DATA_DIR / f"cache_{symbol}_{interval}.csv"
@@ -153,20 +215,52 @@ def load_local_candles(symbol: str, interval: str, limit: int) -> list[dict]:
         return []
 
 
-def resolve_data(base_url: str, symbol: str, interval: str, limit: int, offline: bool) -> dict:
-    """三级降级：后端实时 → 本地缓存 → 本地合成。永远返回可用数据。"""
-    note: str | None = None
+def _iso_now() -> str:
+    return datetime.now(tz=timezone.utc).astimezone().isoformat(timespec="seconds")
 
-    if not offline:
+
+@st.cache_data(ttl=5, show_spinner=False)
+def fetch_direct_klines(symbol: str, interval: str, limit: int) -> list[dict]:
+    """前端进程直连 Binance 公共 REST（给"没有后端"的云端部署兜底）。"""
+    return fetch_direct_klines_raw(symbol, interval, limit)
+
+
+def resolve_data(base_url: str, symbol: str, interval: str, limit: int, offline: bool) -> dict:
+    """降级链：后端实时 → Binance 直连 → 本地缓存 → 合成行情。永远返回可用数据。"""
+    note: str | None = None
+    now = time.time()
+    backend_down = st.session_state.get("_backend_down_until", 0.0) > now
+
+    if offline:
+        note = "已手动开启离线模式（Mock），不访问后端"
+    elif backend_down:
+        note = "后端暂不可达，使用直连行情（60 秒后重试后端）"
+    else:
         try:
             payload = fetch_latest(base_url, symbol, interval, limit)
+            st.session_state["_backend_down_until"] = 0.0
             payload["ui_source"] = "🟢 后端实时"
             payload["ui_note"] = None
             return payload
         except Exception as exc:  # noqa: BLE001
-            note = f"后端不可达（{type(exc).__name__}），已自动降级"
-    else:
-        note = "已手动开启离线模式（Mock），不访问后端"
+            st.session_state["_backend_down_until"] = now + 60.0
+            note = f"后端不可达（{type(exc).__name__}），已切换到 Binance 直连"
+
+    if not offline:
+        direct = fetch_direct_klines(symbol, interval, limit)
+        if direct:
+            return {
+                "symbol": symbol,
+                "interval": interval,
+                "price": float(direct[-1]["c"]),
+                "candles": direct,
+                "count": len(direct),
+                "stale": False,
+                "age_s": 0.0,
+                "source": "🟢 Binance 直连",
+                "ui_source": "🟢 Binance 直连",
+                "ui_note": f"{note}；直连模式只提供行情（情绪/新闻需后端）",
+            }
 
     candles = load_local_candles(symbol, interval, limit)
     if candles:
@@ -1149,6 +1243,8 @@ def render_live_body(ctx: dict) -> None:
     with st.expander("🩺 后端连接详情（/api/health）", expanded=False):
         if ctx["offline"]:
             st.caption("离线模式，未请求后端。")
+        elif st.session_state.get("_backend_down_until", 0.0) > time.time():
+            st.caption("后端暂不可达，已切换 Binance 直连行情（60 秒后重试后端）。")
         else:
             try:
                 st.json(requests.get(f"{ctx['base_url']}/api/health", timeout=2.0).json())
@@ -1351,7 +1447,11 @@ with tab_mood:
     else:
         sentiment = fetch_sentiment(backend_url, symbol)
         if not sentiment:
-            st.warning("后端不可达，情绪与新闻暂不可用（行情与回测不受影响）。", icon="📡")
+            sentiment = fetch_direct_sentiment(symbol)
+            if sentiment:
+                st.caption("直连模式：后端未部署，情绪数据由前端进程直接获取。")
+        if not sentiment:
+            st.warning("后端与直连数据源都不可达，情绪暂不可用（行情与回测不受影响）。", icon="📡")
         else:
             if sentiment.get("offline"):
                 st.warning(
@@ -1392,6 +1492,8 @@ with tab_mood:
             st.divider()
             st.markdown("##### 📰 主要新闻")
             news = fetch_news(backend_url)
+            if not news or not news.get("items"):
+                news = fetch_direct_news()
             if not news or not news.get("items"):
                 st.info("新闻源暂不可用。", icon="📰")
             else:

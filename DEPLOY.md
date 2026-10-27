@@ -82,6 +82,17 @@ git push -u origin main
 
 ---
 
+## 4.5 更省事的方案：只部署前端（直连模式）
+
+不想注册 Render / 绑卡时，直接只部署前端：
+
+1. <https://share.streamlit.io> → New app → 选 `Prime-ocde/crypto-agent`；
+2. Main file：`frontend/app.py`，Python 3.12；
+3. Secrets 留空 → Deploy。
+
+前端会直连 Binance 公共 REST 取行情（`后端 → 直连 → 缓存 → 合成`），
+回测、三策略、合约/做空全部可用；资金费与多空比需要后端，页面会标注。
+
 ## 4. 全链路验证
 
 ```powershell
