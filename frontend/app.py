@@ -33,6 +33,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.direct_feed import fetch_klines as fetch_direct_klines_raw  # noqa: E402
+from core.freshness import usable  # noqa: E402
 from core.manual_trading import ManualAccount, now_ms  # noqa: E402
 from core.indicators import bollinger, kdj, macd, rsi, sma  # noqa: E402
 from core.news import merge_news, parse_rss  # noqa: E402
@@ -58,10 +59,13 @@ DIRECT_TIMEOUT = (2.0, 4.0)
 DIRECT_RETRY_S = 30.0
 # 本地缓存落后超过约 10 根 K 线就算过期 → 改用明确标注的合成行情
 CACHE_MAX_BARS = 10
+# 「上次成功数据」最多兜底多久：网络抖一下不必跳合成行情，但太久就别硬撑
+LAST_GOOD_MAX_AGE_S = float(os.getenv("LAST_GOOD_MAX_AGE_SECONDS", "1800"))
 
 SOURCE_COLORS = {
     "🟢 后端实时": "#26a69a",
     "🟡 后端数据滞后": "#ffb74d",
+    "🟡 上次成功数据": "#ffb74d",
     "🟡 本地缓存": "#ffb74d",
     "🔴 离线模拟": "#ef5350",
 }
@@ -285,10 +289,36 @@ def _fmt_age(seconds: float | None) -> str:
 
 
 def resolve_data(base_url: str, symbol: str, interval: str, limit: int, offline: bool) -> dict:
-    """降级链：后端实时 → Binance 直连 → 本地缓存 → 合成行情。永远返回可用数据。"""
+    """降级链：后端实时 → Binance 直连 → 上次成功数据 → 本地缓存 → 合成行情。
+
+    「上次成功数据」这一层很关键：网络抖一下就直接跳合成行情，价格会突然跳到另一个世界，
+    看起来像应用崩了。只要上一次成功拿到的数据还在可用期内，就先用它顶上并明确标注。
+    """
     note: str | None = None
     now = time.time()
     backend_down = st.session_state.get("_backend_down_until", 0.0) > now
+
+    def remember(payload: dict) -> dict:
+        st.session_state["_last_good_payload"] = payload
+        st.session_state["_last_good_ts"] = now
+        return payload
+
+    def last_good() -> dict | None:
+        payload = st.session_state.get("_last_good_payload")
+        stamp = st.session_state.get("_last_good_ts")
+        if not payload or not stamp:
+            return None
+        age = now - float(stamp)
+        if not usable(age, LAST_GOOD_MAX_AGE_S):
+            return None
+        fallback = dict(payload)
+        fallback["ui_source"] = "🟡 上次成功数据"
+        fallback["ui_note"] = (
+            f"本次取数失败（{note or '网络抖动'}），显示 {_fmt_age(age)} 前的最后一次成功行情"
+        )
+        fallback["stale"] = True
+        fallback["age_s"] = age
+        return fallback
 
     if offline:
         note = "已手动开启离线模式（Mock），不访问后端"
@@ -311,7 +341,7 @@ def resolve_data(base_url: str, symbol: str, interval: str, limit: int, offline:
             else:
                 payload["ui_source"] = "🟢 后端实时"
                 payload["ui_note"] = None
-            return payload
+            return remember(payload)
         except Exception as exc:  # noqa: BLE001
             st.session_state["_backend_down_until"] = now + 60.0
             note = f"后端不可达（{type(exc).__name__}），已切换到 Binance 直连"
@@ -319,20 +349,26 @@ def resolve_data(base_url: str, symbol: str, interval: str, limit: int, offline:
     if not offline:
         direct = fetch_direct_klines_guarded(symbol, interval, limit)
         if direct:
-            return {
-                "symbol": symbol,
-                "interval": interval,
-                "price": float(direct[-1]["c"]),
-                "candles": direct,
-                "count": len(direct),
-                "stale": False,
-                "age_s": 0.0,
-                "source": "🟢 Binance 直连",
-                "ui_source": "🟢 Binance 直连",
-                "ui_note": f"{note}；直连模式只提供行情（情绪/新闻需后端）",
-            }
+            return remember(
+                {
+                    "symbol": symbol,
+                    "interval": interval,
+                    "price": float(direct[-1]["c"]),
+                    "candles": direct,
+                    "count": len(direct),
+                    "stale": False,
+                    "age_s": 0.0,
+                    "source": "🟢 Binance 直连",
+                    "ui_source": "🟢 Binance 直连",
+                    "ui_note": f"{note}；直连模式只提供行情（情绪/新闻需后端）",
+                }
+            )
         if st.session_state.get("_direct_down_until", 0.0) > now:
             note = f"{note}；直连不可达（{DIRECT_RETRY_S:.0f} 秒内不再重试）"
+
+    fallback = last_good()
+    if fallback is not None:
+        return fallback
 
     candles = load_local_candles(symbol, interval, limit)
     cache_age_s: float | None = None
