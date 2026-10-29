@@ -12,6 +12,8 @@ numpy>=1.26.0
 streamlit>=1.49.0
 # 阶段二：K 线改用 TradingView Lightweight Charts（0.3.0 起 API 变为 Chart/Series 类）
 streamlit-lightweight-charts-pro>=0.3.0,<0.4
+# 锁死底层实现：0.3.0 的 series/options 结构按这个版本调过，云端构建必须可复现
+lightweight-charts-pro==0.1.0
 # 阶段三迁移完剩余 4 张 Plotly 图后删除 plotly
 plotly>=5.24.0
 requests>=2.32.0
