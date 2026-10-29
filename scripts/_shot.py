@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -22,7 +23,7 @@ EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 PORT = 9333
 
 
-async def capture(url: str, out: Path, wait_s: float = 12.0, js: str = "", out2: Path | None = None, wait2: float = 10.0) -> None:
+async def capture(url: str, out: Path, wait_s: float = 12.0, js: str = "", out2: Path | None = None, wait2: float = 10.0, post_js_wait: float = 3.5) -> None:
     import websockets
 
     profile = Path(tempfile.mkdtemp(prefix="edge-cdp-"))
@@ -57,6 +58,18 @@ async def capture(url: str, out: Path, wait_s: float = 12.0, js: str = "", out2:
 
         async with websockets.connect(target, max_size=80 * 1024 * 1024) as ws:
             await ws.send(json.dumps({"id": 1, "method": "Page.enable"}))
+            ua = os.getenv("SHOT_UA")
+            if ua:
+                await ws.send(json.dumps({"id": 9, "method": "Network.enable"}))
+                await ws.send(
+                    json.dumps(
+                        {
+                            "id": 10,
+                            "method": "Network.setUserAgentOverride",
+                            "params": {"userAgent": ua},
+                        }
+                    )
+                )
             await ws.send(json.dumps({"id": 2, "method": "Page.navigate", "params": {"url": url}}))
             await asyncio.sleep(wait_s)
             if js:
@@ -69,7 +82,7 @@ async def capture(url: str, out: Path, wait_s: float = 12.0, js: str = "", out2:
                         }
                     )
                 )
-                await asyncio.sleep(3.5)
+                await asyncio.sleep(post_js_wait)
             await ws.send(json.dumps({"id": 3, "method": "Page.captureScreenshot", "params": {"format": "png"}}))
             while True:
                 message = json.loads(await ws.recv())
@@ -95,7 +108,8 @@ if __name__ == "__main__":
     wait = float(sys.argv[3]) if len(sys.argv) > 3 else 12.0
     js = sys.argv[4] if len(sys.argv) > 4 else ""
     out2 = Path(sys.argv[5]) if len(sys.argv) > 5 else None
-    asyncio.run(capture(url, out, wait, js, out2))
+    post_wait = float(sys.argv[6]) if len(sys.argv) > 6 else 3.5
+    asyncio.run(capture(url, out, wait, js, out2, 10.0, post_wait))
     print(f"OK {out} ({out.stat().st_size} bytes)")
     if out2:
         print(f"OK {out2} ({out2.stat().st_size} bytes)")
