@@ -1,15 +1,15 @@
-# 加密货币多策略量化回测系统（1m → 1y · 现货/合约 · 多空双向 · 情绪新闻）
+# 加密货币多策略量化回测系统（1m → 1y · 现货/合约 · 多空双向 · 手动交易 · 技术指标）
 
 > 课程项目《金融 Agent 搭建》· **纯模拟盘（Paper Trading）**
-> Binance 公共行情 → FastAPI 实时服务 → Streamlit + Plotly 前端 → 三策略回测（网格 / 马丁格尔 / 趋势）→ 现货 & 合约（杠杆 / 强平 / 资金费 / 做空）→ 市场情绪与新闻面板
+> Binance 公共行情 → FastAPI 实时服务 → Streamlit + **TradingView Lightweight Charts** 前端 → 三策略回测（网格 / 马丁格尔 / 趋势）→ 现货 & 合约（杠杆 / 强平 / 做空）→ **手动交易（1–100x）** → **技术指标（MA / BOLL / MACD / RSI / KDJ）** → 市场情绪与新闻面板
 
-![实时行情（周 K · 合约 10x）](docs/screenshot_live.png)
+![实时行情 · Lightweight Charts](docs/verify_live_lightweight.png)
 
-![回测分析（周 K · 合约 10x · 双向）](docs/screenshot_backtest.png)
-
-![情绪与新闻](docs/screenshot_mood.png)
+![技术指标 · MA / BOLL / MACD / RSI / KDJ](docs/verify_indicators.png)
 
 ![三策略同台对比](docs/screenshot_compare.png)
+
+![情绪与新闻](docs/screenshot_mood.png)
 
 ---
 
@@ -18,15 +18,18 @@
 | 能力 | 实现 | 演示时怎么体现 |
 | --- | --- | --- |
 | 多周期行情 | 1m / 5m / 1h / 1d / 1w / 1M 原生订阅，**1y 由月 K 聚合** | 侧边栏切周期，图上从"分钟"一路拉到"年" |
+| **K 线引擎** | TradingView **Lightweight Charts**（流式、原生缩放/十字光标/区间按钮） | 拖「显示 K 线根数」，窗口自动重排 |
+| **技术指标** | MA / BOLL 叠加主图；MACD / RSI / KDJ 各占独立副图，参数可调 | 侧边栏勾选指标，副图轴上有指标名标注 |
+| **手动交易** | 1–100x 做多做空、实时强平价与距强平 %、爆仓预警、成交点回填、账户落盘 | 「💼 手动交易」开一手 100x，看 0.5% 的强平距离 |
 | 三套策略 | 网格 / 马丁格尔 / 趋势跟踪，统一结果契约 | 切策略，参数表单自动变化 |
 | 现货 / 合约 | 现货 1:1；合约按杠杆放大名义价值，**强平 + 资金费率** | 打开合约、拉杠杆，指标卡出现强平次数与资金费 |
 | **多空双向** | 合约模式下趋势策略可做空（空头收取资金费，暴涨强平） | 打开「允许做空」，空头排列自动开空 |
-| **市场情绪** | 恐惧贪婪指数 + 资金费 + 多空比 → FOMO 分数 | 情绪页仪表盘 + 30 天曲线 + 做空提示 |
+| **市场情绪** | 恐惧贪婪指数 → FOMO 分数（资金费 / 多空比可选，见 §8.5） | 情绪页仪表盘 + 30 天曲线 + 做空提示 |
 | **主要新闻** | CoinDesk / Cointelegraph RSS 聚合（无 Key） | 情绪页新闻列表，失败显示离线示例 |
 | 策略横评 | 同一段行情跑三种策略，叠加净值曲线 | 一键回答"哪个策略更好" |
-| 断线自愈 | 指数退避重连 + 心跳假死检测 + 端点自动切换 | `/api/health` 看重连次数与当前端点 |
-| 行情兜底 | REST 预热 → 本地 CSV 缓存 → 本地合成行情 | 拔网线后刷新页面，图表照样有数据 |
-| 可部署 | FastAPI 上云 + Streamlit Cloud 前端 | 教室用公网 URL 打开 |
+| 断线自愈 | 指数退避重连 + 心跳假死检测 + 端点自动切换 + **REST 看门狗** | `/api/health` 看重连次数与当前端点 |
+| 行情兜底 | REST 预热 → 本地 CSV 缓存 → **上次成功数据** → 合成行情 | 拔网线后刷新页面，图表照样有数据且不跳价 |
+| 可部署 | Streamlit Cloud 前端（可免后端）+ 可选 FastAPI 后端 | 教室用公网 URL 打开 |
 
 **绝对不碰真实资金**：没有 API Key、没有下单接口、没有签名逻辑，`requests` 只请求公开行情。
 
@@ -37,6 +40,9 @@
 | 两级信息架构（标签页 + 侧边栏） | 主区只放结论，参数全部收进侧边栏 |
 | 策略驱动参数表单 | 选马丁格尔出现"加仓倍数/最大层数"，选趋势出现"快慢线/止损" |
 | 市场模式 + 杠杆 | 现货/合约一键切换，实时显示强平线（10x ≈ −9.5%） |
+| **手动交易面板** | 下单/持仓分栏，权益、保证金占用率、距强平 % 一屏可读，强平三档预警 |
+| **图表根数与指标** | 根数变化时图表重建并重新 fitContent；指标线不占右轴，只留「最新价」 |
+| **数据源状态条** | 绿=实时、黄=滞后/上次成功数据、红=合成行情，一眼看出数据是真的还是兜底 |
 | 参数健康度 | 网格间距 ≤ 双边手续费红牌；马丁格尔资金需求 > 本金红牌 |
 | 暂停实时刷新 | 讲解时冻结画面，参数仍即时生效 |
 | 结果指纹 | 改了策略/参数/周期还没重跑，明确提示"旧结果" |
@@ -50,29 +56,36 @@
 
 ```
 ┌──────────────── 浏览器（Streamlit） ────────────────┐
-│ 侧边栏：策略 / 周期 / 现货或合约 / 杠杆 / 参数        │
-│ 实时行情：K 线 + 网格线或均线 + 成交点                │
-│ 回测分析：指标卡 + 净值回撤 + 三策略横评              │
+│ 侧边栏：策略 / 周期 / 市场模式 / 杠杆 / 技术指标       │
+│ 📊 实时行情：Lightweight Charts + 指标叠加/副图        │
+│ 💼 手动交易：下单面板 + 持仓卡 + 账户落盘              │
+│ 🧮 回测分析：指标卡 + 净值回撤 + 三策略横评            │
 │        │                                            │
+│        ├─ core/manual_trading.ManualAccount          │
+│        ├─ core/indicators.{sma,bollinger,macd,rsi,kdj}│
 │        └─ core/strategy_registry.run_backtest()      │
 └──────────────────────┬──────────────────────────────┘
-                       │ 每 2 秒 REST
+                       │ 每 2 秒 REST（后端不可达时直连 Binance）
 ┌──────────────────────▼──────────────────────────────┐
-│ FastAPI                                              │
+│ FastAPI（可选：纯前端部署时整块跳过）                  │
 │  /api/latest_data（1y 现场由 1M 聚合）                │
 │  /api/config（策略目录 + 执行参数）                    │
 │  POST /api/backtest（strategy + params）              │
-│  FeedManager：REST 预热 → CSV → 合成；WS 指数退避      │
+│  FeedManager：并发 REST 预热 → CSV → 合成；WS 退避     │
+│              + REST 看门狗（WS 断线时每 30s 补数据）   │
 │  CandleStore：每个 (symbol, interval) 环形缓冲         │
 └──────────────────────┬──────────────────────────────┘
-                       │ wss://stream.binance.com:9443 | data-stream.binance.vision
+                       │ wss://data-stream.binance.vision | stream.binance.com
                   Binance 公共行情（只读）
 ```
 
 **核心抽象**
 
 - `core/aggregate.py`：日历对齐的聚合（周一 / 自然月 / 自然年），年 K = 12 根月 K；
-- `core/execution.py`：共享账本 `Ledger`，现货 = 杠杆 1 的特例，合约 = 保证金 + 强平 + 资金费；
+- `core/execution.py`：共享账本 `Ledger`，现货 = 杠杆 1 的特例，合约 = 保证金 + 强平 + 资金费；支持 1–100x、**杠杆按笔锁定**、`to_dict/from_dict` 落盘；
+- `core/manual_trading.py`：手动交易账户（下单 / 平仓 / tick / 快照 / JSON 存档），UI 只读快照；
+- `core/indicators.py`：MA / BOLL / MACD / RSI / KDJ 纯函数，输出与 K 线等长；
+- `core/freshness.py`：旧数据可用性判定（实时图与兜底链共用）；
 - `core/strategy_registry.py`：策略注册表 + 统一结果契约，前端只写一套渲染。
 
 ---
@@ -83,11 +96,15 @@
 crypto-grid-quant/
 ├── backend/               # FastAPI + WS + 缓存 + 周期聚合接口
 │   ├── external.py        # 情绪/新闻外部数据（缓存 + 负缓存 + 离线兜底）
-│   └── ...                # config / store / binance_* / mock_feed / feeds / main
+│   ├── feeds.py           # 并发预热 + REST 看门狗（WS 断线时补数据）
+│   └── ...                # config / store / binance_* / mock_feed / main
 ├── core/
 │   ├── candles.py         # K 线输入规范化
 │   ├── aggregate.py       # 周/月/年 K 聚合（日历对齐）
-│   ├── execution.py       # 共享账本：现货/合约、杠杆、多空强平、资金费
+│   ├── execution.py       # 共享账本：现货/合约、杠杆、多空强平、资金费、序列化
+│   ├── manual_trading.py  # 手动交易账户：下单/平仓/tick/快照/JSON 落盘
+│   ├── indicators.py      # MA / BOLL / MACD / RSI / KDJ（纯函数）
+│   ├── freshness.py       # 旧数据可用性判定（兜底链共用）
 │   ├── report.py          # 统一绩效汇总契约
 │   ├── timeframe.py       # 周期定义、原生/派生划分、年化系数
 │   ├── metrics.py         # 回撤 / 夏普 / 胜率 / 盈亏比
@@ -97,11 +114,15 @@ crypto-grid-quant/
 │   ├── martingale.py      # 马丁格尔
 │   ├── trend.py           # 趋势跟踪（可做空）
 │   └── strategy_registry.py
-├── frontend/app.py        # Streamlit（实时行情 / 回测 / 情绪新闻）
-├── tests/                 # 92 项测试
-├── scripts/               # 一键启动 + 网络自检 + 防火墙放行
+├── frontend/
+│   ├── app.py             # Streamlit（实时行情 / 手动交易 / 回测 / 情绪新闻）
+│   └── charts.py          # Lightweight Charts 适配层（数据整形 + 指标 + 价格线）
+├── tests/                 # 144 项测试
+├── scripts/               # 一键启动 + 网络自检 + 部署验收 + 截图工具
+├── deploy/                # 后端 Dockerfile / HF Space / VPS bootstrap
+├── .github/workflows/     # keepalive：定时唤醒 Streamlit 免费实例
 ├── docs/                  # 运行截图
-├── requirements.txt / Procfile / render.yaml / .env.example
+├── requirements.txt / requirements-backend.txt / Procfile / render.yaml / .env.example
 ```
 
 ---
@@ -256,31 +277,43 @@ Windows 一键：`powershell -ExecutionPolicy Bypass -File scripts\start_demo.ps
 ### 8.5 已知局限
 
 - 未计滑点、挂单排队、限频；强平按当根最低价近似；
-- 合约只做多，不做空、不模拟逐仓/全仓切换与自动减仓（ADL）；
+- 回测引擎的网格/马丁格尔仍只做多（做空需要另一套风控模型），**手动交易支持双向**；
 - 资金费按固定费率近似，未接真实资金费历史；
+- 手动交易的账户存档写在 `data/manual/*.json`：本地持久，Streamlit Cloud 等容器环境重启即丢；
+- 历史 K 线图（Lightweight Charts）**不支持增量更新**，前端每 5 秒重建一次以刷新行情，
+  重建瞬间会重置缩放（`CHART_REFRESH_SECONDS` 可调；这是该组件 0.3.0 的限制，不是配置问题）；
 - 长周期样本少（月 K 111 根、年 K 10 根），统计意义有限。
 
 ---
 
-## 8.5 市场情绪（FOMO）与新闻
+## 8.6 市场情绪（FOMO）与新闻
 
 ### 数据来源（全部免费、无 Key）
 
-| 数据 | 来源 | 兜底 |
-| --- | --- | --- |
-| 恐惧贪婪指数 | `api.alternative.me/fng`（近 30 天） | 离线示例曲线 |
-| 资金费率 | Binance U 本位 `premiumIndex` | 默认 0.01% / 8h |
-| 多空账户比 | Binance `globalLongShortAccountRatio` | 默认 1.10 |
-| 新闻 | CoinDesk / Cointelegraph RSS | 明确标注的离线示例 |
+| 数据 | 来源 | 兜底 | 现状 |
+| --- | --- | --- | --- |
+| 恐惧贪婪指数 | `api.alternative.me/fng`（近 30 天） | 离线示例曲线 | ✅ 前端直连可用 |
+| 新闻 | CoinDesk / Cointelegraph RSS | 明确标注的离线示例 | ✅ 前端直连可用 |
+| 资金费率 | Binance U 本位 `premiumIndex` | 默认 0.01% / 8h | ⚠️ 需后端，且见下方说明 |
+| 多空账户比 | Binance `globalLongShortAccountRatio` | 默认 1.10 | ⚠️ 需后端，且见下方说明 |
+
+> **关于资金费率 / 多空比（重要）**
+> 这两个接口在 `fapi.binance.com`，`data-api.binance.vision` 上没有对应路径（实测 404），
+> 而且币安对该域名有**地域限制**：美区机房（Render / Railway / HF 等常见免费托管）会收到 **451**。
+> 所以本项目的默认部署（前端直连模式）**不启用这两项**，FOMO 分数只由恐惧贪婪指数构成，
+> 页面会明确标注「默认值」。要在课堂上看真实资金费，只能把后端放在香港/新加坡的机器上，
+> 并配置 `BACKEND_BASE_URL`；代码已支持，只是不作为默认前提。
 
 ### FOMO 分数怎么算（`core/sentiment.py`）
 
 ```
 score = 恐惧贪婪指数(0~100)
-      + clamp(资金费 / 0.05%, -1, 1) × 15
-      + clamp(多空比 − 1, -1, 1) × 10
+      + clamp(资金费 / 0.05%, -1, 1) × 15      # 仅在拿到真实资金费时计入
+      + clamp(多空比 − 1, -1, 1) × 10          # 仅在拿到真实多空比时计入
 最终钳制到 0~100
 ```
+
+缺项时对应分量为 0，页面标注「部分指标使用默认值」——不会假装有数据。
 
 | 区间 | 标签 | 与做空的关系 |
 | --- | --- | --- |
@@ -353,9 +386,16 @@ powershell -ExecutionPolicy Bypass -File scripts\start_public_tunnel.ps1
 
 ### 10.2 持久化：Render + Streamlit Cloud
 
-- **后端** Render/Railway：`uvicorn backend.main:app --host 0.0.0.0 --port $PORT`，健康检查 `/api/health`；- **前端** Streamlit Cloud：Main file `frontend/app.py`，Secrets 填 `BACKEND_BASE_URL`；
-- 免费套餐建议 `SYMBOLS=BTCUSDT,ETHUSDT`、`INTERVALS=1m,1d,1w`，省 WS 与内存；
+- **后端** Render：Build `pip install -r requirements-backend.txt`，Start
+  `uvicorn backend.main:app --host 0.0.0.0 --port $PORT`，健康检查 `/api/health`；
+  一键入口：<https://render.com/deploy?repo=https://github.com/Prime-ocde/crypto-agent>（读 `render.yaml`）；
+- **前端** Streamlit Cloud：Main file `frontend/app.py`，Secrets 填 `BACKEND_BASE_URL`；
+- 免费套餐建议 `SYMBOLS=BTCUSDT,ETHUSDT`、`INTERVALS=1m,5m,1h,1d,1w,1M`（并发预热后启动约 6 秒）；
 - 演示前 5 分钟唤醒后端（免费套餐会休眠）。
+
+> **现实约束**：Render 新账号创建服务必须先绑定支付方式（API 会返回 `402`），
+> 且美区 IP 对 `fapi.binance.com` 返回 `451`——所以「绑卡 + Render」能让 K 线更稳，
+> 但补不齐资金费/多空比。若这两项是刚需，见 §10.5 的香港/新加坡方案。
 
 检查清单：`/api/health` 为 `ok`、`/api/config` 里 `strategies` 三个、`trading_modes` 两个、前端状态条为「后端实时」。
 
@@ -370,38 +410,40 @@ powershell -ExecutionPolicy Bypass -File scripts\start_public_tunnel.ps1
 3. Secrets **留空**（不需要后端），直接 Deploy。
 
 前端会自动进入**直连模式**：由 Streamlit 服务端进程直接请求 Binance 公共 REST，
-降级顺序变为 `后端 → Binance 直连 → 本地缓存 → 合成行情`。
+降级顺序变为 `后端 → Binance 直连 → 上次成功数据 → 本地缓存 → 合成行情`。
 
 | 能力 | 直连模式 |
 | --- | --- |
-| 实时 K 线 / 回测 / 三策略 / 合约 / 做空 | ✅ 全部可用 |
+| 实时 K 线 / 技术指标 / 手动交易 / 回测 / 三策略 / 合约 / 做空 | ✅ 全部可用 |
 | 情绪（恐惧贪婪指数） | ✅ alternative.me 直连 |
-| 资金费 / 多空比 | ❌ 需要后端（页面标注「需后端」） |
+| 资金费 / 多空比 | ❌ 需要后端，且受币安地域限制（见 §8.5） |
 | 新闻 | ✅ CoinDesk / Cointelegraph RSS 直连 |
 | 行情更新方式 | 2 秒轮询 REST（没有后端 WebSocket 推送） |
 
-> Streamlit Cloud 免费实例在长时间无人访问后会休眠，首次打开唤醒约 20~40 秒。
+> **保持唤醒**：免费实例长时间无访问会休眠，首次打开唤醒约 20~40 秒。
+> 仓库里带了一个 GitHub Actions 工作流 `.github/workflows/keepalive.yml`，
+> 每 10 分钟访问一次应用（免费、不需要信用卡）；公共仓库默认启用，可在 Actions 页面手动 Run 一次验证。
 
 **已部署示例**：<https://crypto-agent-ac2s7gbjsf9iax8hyznvst.streamlit.app>
 
-- 实测：实时行情为 Binance 直连（最新价随行情变动），回测能跑出指标卡与成交分布；
+- 实测：Lightweight Charts 渲染 300 根 K 线 + MA/BOLL 叠加 + MACD 副图，最新价随行情变动；
 - 情绪页：恐惧贪婪指数与新闻为直连，资金费/多空比标注「需后端」；
 - 验收命令：`powershell -ExecutionPolicy Bypass -File scripts\deploy_check.ps1 -Frontend <地址>`。
 
-![Streamlit Cloud 云端回测](docs/screenshot_streamlit_cloud.png)
+![Streamlit Cloud 云端运行（阶段二）](docs/screenshot_cloud_stage2.png)
 
 ![Streamlit Cloud 情绪与新闻](docs/screenshot_cloud_mood.png)
 
 ### 10.5 自建后端（云服务器，推荐香港/新加坡）
 
-直连模式只缺「资金费 / 多空比」，要补齐就得有一个能访问 Binance 的后端进程。
+直连模式只缺「资金费 / 多空比」，要补齐就得有一个能访问 Binance 合约接口的后端进程。
 
-| 方案 | 费用 | 能否连 Binance | 备案 | 适合 |
+| 方案 | 费用 | 能否连 Binance 合约接口 | 备案 | 适合 |
 | --- | --- | --- | --- | --- |
-| Render Free | 0 元 | ✅（美国） | 不需要 | 有信用卡可绑 |
-| 香港/新加坡轻量 | ~¥30–60/月 | ✅ | 不需要 | 无信用卡、要稳定 |
+| Render Free | 0 元 | ⚠️ 美区 IP 对 `fapi` 返回 451 | 不需要 | 能绑卡；只补 K 线稳定性 |
+| 香港/新加坡轻量 | ~¥30–60/月 | ✅ | 不需要 | 无信用卡、要稳定、要资金费 |
 | 大陆轻量 | ~¥24–40/月 | ❌ 通常被墙 | 80/443 需备案 | 不推荐 |
-| Hugging Face Space | 0 元 | ✅ | 不需要 | 能打开 HF 网站 |
+| Hugging Face Space | 0 元 | ⚠️ 同美区限制 | 不需要 | 能打开 HF 网站 |
 
 **步骤（Ubuntu 22.04，2C2G 即可）**
 
@@ -434,16 +476,21 @@ cd /opt/crypto-agent && sudo git pull && sudo systemctl restart crypto-agent-api
 
 ## 11. 教室演示动线（3 分钟）
 
-1. 打开页面：状态条「后端实时 / 合约 10x / 策略」；
+1. 打开页面：状态条「Binance 直连 / 合约 10x / 策略」（后端在线时是「后端实时」）；
 2. 侧边栏把周期从 `1m` 切到 `1w`，再切 `1M`、`1y` —— **同一套策略在不同时间尺度下的表现差异**；
-3. 切策略（网格 → 马丁 → 趋势），参数表单随之变化；
-4. 打开「合约」，把杠杆拉到 10x，指出强平线提示（多头 −9.5% / 空头 +9.5%），并保持「允许做空」开启；
-5. 「回测分析」→ 运行回测：讲指标卡、强平次数、资金费，以及空头开仓/平仓的成交点；
-6. 「运行对比」，三策略同台；
-7. 切到「🧠 情绪 · 新闻」：FOMO 仪表盘、30 天恐惧贪婪曲线、三条分量指标、实时新闻标题；
-8. 展开「回测假设」，主动交代未来函数、手续费、强平近似、资金费结算。
+3. 拉一下「显示 K 线根数」：图表重建并显示新窗口（讲清这是该图表组件的刷新机制）；
+4. 勾选技术指标（BOLL / MACD / RSI / KDJ）：叠加层不占右轴，副图轴上标着指标名；
+5. 切策略（网格 → 马丁 → 趋势），参数表单随之变化；
+6. 打开「合约」，把杠杆拉到 10x，指出强平线提示（多头 −9.5% / 空头 +9.5%），并保持「允许做空」开启；
+7. 「回测分析」→ 运行回测：讲指标卡、强平次数、资金费，以及空头开仓/平仓的成交点；
+8. 切到「💼 手动交易」：把杠杆拉到 100x 开一手，指出「距强平 0.50%」的红色预警与图上的强平价虚线，
+   再一键平仓，看成交记录里的双边手续费——**这是杠杆最直观的一课**；
+9. 「运行对比」，三策略同台；
+10. 切到「🧠 情绪 · 新闻」：FOMO 仪表盘、30 天恐惧贪婪曲线、分量指标、实时新闻标题；
+11. 展开「回测假设」，主动交代未来函数、手续费、强平近似、资金费结算。
 
 > 教室数据提示：周 K 300 根 ≈ 6 年；月 K 111 根；年 K 10 根。别用 10 根年 K 断言策略优劣。
+> 弱网提示：顶部状态条变黄（🟡 上次成功数据 / 后端数据滞后）时，先说清"这是保底数据，不是伪造"。
 
 ---
 
@@ -451,13 +498,14 @@ cd /opt/crypto-agent && sudo git pull && sudo systemctl restart crypto-agent-api
 
 | 场景 | 动作 | 话术 |
 | --- | --- | --- |
-| 连不上币安 | 开「离线模式」 | "三级降级：实时→缓存→合成，策略引擎完全一致" |
+| 连不上币安 | 开「离线模式」 | "五级降级：实时→上次成功→缓存→合成，策略引擎完全一致" |
 | 后端冷启动 | 先讲降级再跑回测 | "回测在前端本地跑，不依赖后端" |
-| 老师问"杠杆怎么算" | 指强平线提示 | "多头 `entry×(1−1/杠杆+MMR)`、空头 `entry×(1+1/杠杆−MMR)`，10x 时两端各 9.5%" |
+| 老师问"杠杆怎么算" | 打开手动交易 100x | "多头 `entry×(1−1/杠杆+MMR)`、空头 `entry×(1+1/杠杆−MMR)`；100x 时两端各 0.5%" |
 | 老师问"为什么资金费这么多" | 指副指标 | "周 K 持仓按 8 小时结算，10x 下名义价值是权益的 10 倍，资金费很轻松超过手续费" |
 | 老师问"做空赚什么" | 打开空头成交记录 | "价格下跌赚价差，同时**收取**资金费；代价是暴涨会被强平，所以必须带止损" |
-| 老师问"情绪数据哪来的" | 指来源行 | "恐惧贪婪指数来自 alternative.me，资金费/多空比来自币安合约接口；任何一项挂了都会标注并降级" |
+| 老师问"情绪数据哪来的" | 指来源行 | "恐惧贪婪指数来自 alternative.me，前端直连；资金费/多空比需要后端且受币安地域限制，本部署默认不启用" |
 | 老师问"新闻是真的吗" | 看来源标注 | "RSS 实时抓取；抓不到时明确标注『离线示例』，不会把示例当新闻" |
+| 老师问"图上那是哪个指标" | 指副图右轴 | "轴上有名字：MACD(12,26,9)、RSI(14)、KDJ(9,3,3)，参数和侧边栏一致" |
 | 老师问"夏普正为什么还亏 99%" | 指波动率提示 | "算术均值被高波动放大，几何复利被方差吃掉——这就是波动率拖累" |
 
 ---
@@ -465,12 +513,14 @@ cd /opt/crypto-agent && sudo git pull && sudo systemctl restart crypto-agent-api
 ## 13. 测试
 
 ```bash
-pytest -q    # 92 passed
+pytest -q    # 144 passed
 ```
 
-覆盖：三引擎成交/止损/加仓/止盈/做空、共享账本（现货等价、杠杆放大、多空强平、资金费收付）、
+覆盖：三引擎成交/止损/加仓/止盈/做空、共享账本（现货等价、杠杆放大、多空强平、资金费收付、逐仓杠杆锁定、序列化）、
+手动交易账户（100x、强平、落盘恢复、坏存档）、技术指标（BOLL 宽度、MACD 柱=2×(DIF−DEA)、RSI 100/0/50、KDJ 一字板）、
+行情兜底（WS 断开后 REST 补数据、合并保留历史）、数据新鲜度策略、图表适配层（ms→秒、去重升序、标记与参考线）、
 周期聚合（周一周对齐、自然月/年）、情绪打分（边界/钳制/缺失分量）、RSS 解析（去重/排序/坏 XML）、
-REST 契约（1y 派生、合约参数、情绪/新闻端点）、前端 AppTest（切策略/切合约/周 K 渲染/周期透传）。
+REST 契约（1y 派生、合约参数、情绪/新闻端点）、前端 AppTest（切策略/切合约/周 K/离线降级/手动交易闭环）。
 
 ---
 
@@ -514,8 +564,10 @@ A：见"波动率拖累"，页面会主动提示；以净值曲线与最大回�
 
 ## 15. 可以继续做的方向
 
-- 合约空头加入资金费历史曲线与借币成本；
-- 逐仓/全仓切换、自动减仓（ADL）、真实资金费历史；
+- **把图表换成支持增量更新的封装**（当前 Lightweight Charts 0.3.0 只能整图重建，缩放每 5 秒被重置）；
+- 手动交易的止损/止盈挂单（价格触发自动平仓），以及账户存档接外部存储（云端重启不丢）；
+- 指标扩展：ATR / 成交量均线 / 多周期共振，副图支持自定义组合；
+- 逐仓/全仓切换、自动减仓（ADL）、真实资金费历史（需香港/新加坡后端）；
 - 情绪指标与策略联动（例如 FOMO > 80 时自动降低杠杆）；
 - Walk-forward 参数寻优 + 过拟合检验；
 - 多策略组合（按波动率分配资金）。
