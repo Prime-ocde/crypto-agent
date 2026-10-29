@@ -1,0 +1,7 @@
+# 后端（FastAPI 行情服务）最小依赖 —— Render / Railway / VPS 只需装这个
+# 前端依赖（Streamlit / Plotly / Lightweight Charts）见 requirements.txt
+fastapi>=0.115.0
+uvicorn>=0.30.0
+websockets>=13.0
+requests>=2.32.0
+python-dotenv>=1.0.1

@@ -52,48 +52,55 @@ class FeedManager:
         for key in self.settings.stream_keys:
             self._source[key] = live_source
 
-    async def bootstrap(self) -> None:
-        """先把图表填满，再谈实时：REST → 本地缓存 → 合成，逐级降级。"""
-        for key in self.settings.stream_keys:
-            symbol, interval = key
-            candles: list[dict] = []
+    async def _warm_key(self, key: Key) -> None:
+        """预热单个 (symbol, interval)：REST → 本地缓存 → 合成，逐级降级。"""
+        symbol, interval = key
+        candles: list[dict] = []
+        source = "synthetic"
+
+        if not self.settings.is_mock:
+            candles, used_base = await asyncio.to_thread(
+                fetch_klines,
+                tuple(self._rest_bases),
+                symbol,
+                interval,
+                self.settings.kline_limit,
+            )
+            if used_base:
+                self._rest_bases.remove(used_base)
+                self._rest_bases.insert(0, used_base)
+            if candles:
+                source = "rest"
+                try:
+                    await asyncio.to_thread(save_cache, symbol, interval, candles)
+                except OSError as exc:
+                    logger.warning("写入本地缓存失败 %s %s: %s", symbol, interval, exc)
+            else:
+                candles = await asyncio.to_thread(load_cache, symbol, interval)
+                if candles:
+                    source = "cache"
+
+        if not candles:
+            candles = synthesize_candles(
+                symbol,
+                interval,
+                limit=min(self.settings.kline_limit, 500),
+            )
             source = "synthetic"
 
-            if not self.settings.is_mock:
-                candles, used_base = await asyncio.to_thread(
-                    fetch_klines,
-                    tuple(self._rest_bases),
-                    symbol,
-                    interval,
-                    self.settings.kline_limit,
-                )
-                if used_base:
-                    self._rest_bases.remove(used_base)
-                    self._rest_bases.insert(0, used_base)
-                if candles:
-                    source = "rest"
-                    try:
-                        await asyncio.to_thread(save_cache, symbol, interval, candles)
-                    except OSError as exc:
-                        logger.warning("写入本地缓存失败 %s %s: %s", symbol, interval, exc)
-                else:
-                    candles = await asyncio.to_thread(load_cache, symbol, interval)
-                    if candles:
-                        source = "cache"
+        self._source[key] = source
+        loaded = self.store.bulk_load(key, candles)
+        logger.info(
+            "预热 %s %s：%s 根（%s → %s）", symbol, interval, loaded, source, SOURCE_LABELS[source]
+        )
 
-            if not candles:
-                candles = synthesize_candles(
-                    symbol,
-                    interval,
-                    limit=min(self.settings.kline_limit, 500),
-                )
-                source = "synthetic"
+    async def bootstrap(self) -> None:
+        """先把图表填满，再谈实时。
 
-            self._source[key] = source
-            loaded = self.store.bulk_load(key, candles)
-            logger.info(
-                "预热 %s %s：%s 根（%s → %s）", symbol, interval, loaded, source, SOURCE_LABELS[source]
-            )
+        并发预热：12 条 stream 串行请求要 ~30 秒，云平台冷启动会叠加这段等待，
+        Render 健康检查很容易超时。改成并发后通常 3–5 秒完成。
+        """
+        await asyncio.gather(*(self._warm_key(key) for key in self.settings.stream_keys))
 
     async def stop(self) -> None:
         if self._watchdog is not None:

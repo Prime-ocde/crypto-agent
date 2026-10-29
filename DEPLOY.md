@@ -27,31 +27,40 @@ git push -u origin main
 
 ## 2. 部署后端（Render）
 
-1. Render → **New → Blueprint** → 选择 `crypto-agent` 仓库（会自动读取 `render.yaml`）；
-   或 **New → Web Service**，手动填：
+1. 最快的方式：打开 <https://render.com/deploy?repo=https://github.com/Prime-ocde/crypto-agent>
+   （Render 会读取仓库里的 `render.yaml`，登录后点 **Apply** 即可）；
+   或 **New → Blueprint** → 选择 `crypto-agent` 仓库；或 **New → Web Service** 手动填：
 
    | 字段 | 值 |
    | --- | --- |
    | Runtime | Python |
-   | Build Command | `pip install -r requirements.txt` |
+   | Build Command | `pip install -r requirements-backend.txt` |
    | Start Command | `uvicorn backend.main:app --host 0.0.0.0 --port $PORT` |
    | Health Check Path | `/api/health` |
    | Instance | Free |
+
+   > 后端只需要 `requirements-backend.txt`（fastapi / uvicorn / websockets / requests / dotenv）；
+   > 用 `requirements.txt` 会把 Streamlit、Plotly、图表包一起装进后端，构建慢一倍、内存也浪费。
+   > 实例数必须是 **1**：行情缓存在进程内存里，多实例会互相看不到对方的数据。
 
 2. 环境变量（Blueprint 已内置，手动部署时照抄）：
 
    ```
    RUN_MODE=live
    SYMBOLS=BTCUSDT,ETHUSDT
-   INTERVALS=1m,1d,1w
+   INTERVALS=1m,5m,1h,1d,1w,1M
    BINANCE_WS_URL=wss://data-stream.binance.vision/ws
    BINANCE_WS_FALLBACKS=wss://stream.binance.com:9443/ws
    BINANCE_REST_URL=https://data-api.binance.vision
    BINANCE_REST_FALLBACK=https://api.binance.com
    FEE_RATE=0.001
    WS_IDLE_TIMEOUT=30
+   REST_REFRESH_SECONDS=30
    PYTHON_VERSION=3.12.6
    ```
+
+   > `REST_REFRESH_SECONDS` 是 WS 断开后的兜底：每隔 30 秒用 REST 补一次数据，
+   > 否则 WS 连不上时后端会一直返回几小时前的旧行情（本项目踩过这个坑）。
 
 3. 等构建完成，记下后端地址，例如 `https://crypto-agent-api.onrender.com`。
 
@@ -129,7 +138,7 @@ powershell -ExecutionPolicy Bypass -File scripts\deploy_check.ps1 `
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
 | 前端显示「后端不可达 / 离线模拟」 | Secrets 里 `BACKEND_BASE_URL` 没填或填错 | 改 Secrets 后 **Reboot app** |
-| 后端 502 / 构建失败 | `requirements.txt` 装不上 | 看 Render Logs；本项目依赖是宽松版本，3.12 可装 |
+| 后端 502 / 构建失败 | 依赖装不上 | 看 Render Logs；后端请用 `requirements-backend.txt`，别装前端那套 |
 | 首次打开很慢（20~50s） | Render 免费套餐冷启动 | 演示前 5 分钟先访问 `/api/health` 唤醒 |
 | 后端 `status: degraded` | WebSocket 未连上 | 检查 `BINANCE_WS_URL` 是否用 `data-stream.binance.vision` |
 | Streamlit 页面空白 | Python 版本太高/太低 | 用 Advanced settings 选 3.12 |

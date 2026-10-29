@@ -1,11 +1,14 @@
 # Render.com 蓝图：一键部署 FastAPI 后端（免费套餐足够课堂演示）
-# 用法：把仓库推到 GitHub → Render 新建 Blueprint → 选这个仓库
+# 用法：https://render.com/deploy?repo=https://github.com/Prime-ocde/crypto-agent
+#      登录后点 Apply，会按本文件创建服务；部署完把服务地址填进
+#      Streamlit Cloud 的 Secrets：BACKEND_BASE_URL = "https://xxx.onrender.com"
 services:
   - type: web
     name: crypto-grid-quant-api
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    # 只装后端依赖：前端那套 Streamlit / Plotly / 图表包在云上纯属拖慢构建
+    buildCommand: pip install -r requirements-backend.txt
     startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/health
     envVars:
@@ -13,8 +16,9 @@ services:
         value: live
       - key: SYMBOLS
         value: BTCUSDT,ETHUSDT
+      # 周期越多，WebSocket 订阅和内存越大；课堂演示这几个足够
       - key: INTERVALS
-        value: 1m,1d,1w
+        value: 1m,5m,1h,1d,1w,1M
       - key: BINANCE_WS_URL
         value: wss://data-stream.binance.vision/ws
       - key: BINANCE_WS_FALLBACKS
@@ -26,6 +30,9 @@ services:
       - key: FEE_RATE
         value: "0.001"
       - key: WS_IDLE_TIMEOUT
+        value: "30"
+      # WS 断开时用 REST 补数据的间隔（秒）；0 = 关闭
+      - key: REST_REFRESH_SECONDS
         value: "30"
       - key: PYTHON_VERSION
         value: "3.12.6"
