@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -61,7 +62,7 @@ def test_reset_bounds_button_restores_default_range() -> None:
     assert not app.exception
     assert float(next(box for box in app.number_input if "下界" in box.label).value) < default_lower
 
-    reset_button = next(button for button in app.button if "重置" in button.label)
+    reset_button = next(button for button in app.button if "以最新价重置" in button.label)
     reset_button.click().run()
 
     assert not app.exception, f"重置按钮抛异常：{app.exception}"
@@ -154,3 +155,47 @@ def test_backtest_uses_selected_interval(monkeypatch) -> None:
     assert not app.exception, f"周 K 回测抛异常：{app.exception}"
     captions = [caption.value for caption in app.caption]
     assert any("周期：1 周" in caption for caption in captions), captions[:4]
+
+
+def test_offline_mode_renders_candles_even_when_cache_is_stale() -> None:
+    """降级到离线时图表必须有数据：1m 缓存过期曾导致页面只剩一根都画不出来。"""
+    app = AppTest.from_file(str(APP_PATH), default_timeout=90)
+    app.run()
+
+    offline = next(toggle for toggle in app.toggle if "离线" in toggle.label)
+    offline.set_value(True).run()
+    assert not app.exception, f"离线模式抛异常：{app.exception}"
+
+    components = app.get("component_instance")
+    assert components, "离线模式没有渲染任何图表组件"
+    config = json.loads(components[0].proto.json_args)["config"]
+    series = (config.get("charts") or [{}])[0].get("series") or []
+    assert series, "图表组件没有 series"
+    assert len(series[0].get("data") or []) > 0, "离线降级后 K 线数据为空"
+
+
+def test_manual_tab_opens_and_closes_position(tmp_path, monkeypatch) -> None:
+    """手动交易闭环：100x 开多 → 出现强平预警 → 平仓 → 账户落盘。"""
+    monkeypatch.setattr("core.manual_trading.DEFAULT_DATA_DIR", tmp_path)
+
+    app = AppTest.from_file(str(APP_PATH), default_timeout=120)
+    app.run()
+    assert not app.exception, f"页面渲染抛异常：{app.exception}"
+    assert any(tab.label == "💼 手动交易" for tab in app.tabs)
+
+    leverage = next(slider for slider in app.slider if slider.label == "手动杠杆倍数")
+    leverage.set_value(100).run()
+
+    open_button = next(button for button in app.button if "开做多" in button.label)
+    open_button.click().run()
+    assert not app.exception, f"开仓抛异常：{app.exception}"
+
+    metrics = {metric.label: metric.value for metric in app.metric}
+    assert "账户权益" in metrics
+    assert metrics["距强平"] == "0.50%", "100x 满仓做多，距强平应约 0.5%"
+
+    close_button = next(button for button in app.button if "全部平仓" in button.label)
+    close_button.click().run()
+    assert not app.exception, f"平仓抛异常：{app.exception}"
+    assert {metric.label: metric.value for metric in app.metric}["距强平"] == "—"
+    assert (tmp_path / "BTCUSDT.json").exists(), "平仓后账户应已落盘"

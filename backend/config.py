@@ -74,6 +74,7 @@ class Settings:
     backoff_max: float
     jitter_ratio: float
     idle_timeout: float
+    rest_refresh_seconds: float
     fee_rate: float
     initial_capital: float
     mock_tick_seconds: float
@@ -121,18 +122,21 @@ def get_settings() -> Settings:
         symbols=symbols,
         intervals=intervals,
         kline_limit=limit,
-        ws_url=_raw("BINANCE_WS_URL", "wss://stream.binance.com:9443/ws"),
+        # 阶段二：行情统一走币安官方"仅公共行情"域名（更稳、无需 Key、不带下单能力）
+        ws_url=_raw("BINANCE_WS_URL", "wss://data-stream.binance.vision/ws"),
         ws_fallbacks=_as_tuple(
             "BINANCE_WS_FALLBACKS",
-            ("wss://data-stream.binance.vision/ws", "wss://stream.binance.com:443/ws"),
+            ("wss://stream.binance.com:9443/ws", "wss://stream.binance.com:443/ws"),
             upper=False,
         ),
-        rest_url=_raw("BINANCE_REST_URL", "https://api.binance.com").rstrip("/"),
-        rest_fallback=_raw("BINANCE_REST_FALLBACK", "https://data-api.binance.vision").rstrip("/"),
+        rest_url=_raw("BINANCE_REST_URL", "https://data-api.binance.vision").rstrip("/"),
+        rest_fallback=_raw("BINANCE_REST_FALLBACK", "https://api.binance.com").rstrip("/"),
         backoff_base=max(0.2, _as_float("WS_BACKOFF_BASE", 1.0)),
         backoff_max=max(1.0, _as_float("WS_BACKOFF_MAX", 60.0)),
         jitter_ratio=min(max(_as_float("WS_BACKOFF_JITTER", 0.3), 0.0), 0.9),
         idle_timeout=max(5.0, _as_float("WS_IDLE_TIMEOUT", 30.0)),
+        # WS 断开/假死时用 REST 补数据的间隔（秒）；0 表示关闭这条兜底
+        rest_refresh_seconds=max(0.0, _as_float("REST_REFRESH_SECONDS", 30.0)),
         fee_rate=min(max(_as_float("FEE_RATE", 0.001), 0.0), 0.05),
         initial_capital=max(_as_float("INITIAL_CAPITAL", 10_000.0), 1.0),
         mock_tick_seconds=min(max(_as_float("MOCK_TICK_SECONDS", 0.4), 0.1), 5.0),

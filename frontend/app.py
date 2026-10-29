@@ -33,21 +33,38 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.direct_feed import fetch_klines as fetch_direct_klines_raw  # noqa: E402
+from core.manual_trading import ManualAccount, now_ms  # noqa: E402
+from core.indicators import bollinger, kdj, macd, rsi, sma  # noqa: E402
 from core.news import merge_news, parse_rss  # noqa: E402
 from core.sentiment import composite_sentiment  # noqa: E402
 from core.strategy_registry import STRATEGIES, STRATEGY_KEYS  # noqa: E402
 from core.strategy_registry import run_backtest as run_strategy_backtest  # noqa: E402
 from core.synthetic import default_base_price, synthesize_candles  # noqa: E402
 from core.timeframe import interval_label, interval_ms  # noqa: E402
+from frontend.charts import render_candles as render_lwc_candles  # noqa: E402
 
 DATA_DIR = ROOT / "data"
 DEFAULT_BACKEND = "http://127.0.0.1:8000"
 DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"]
-DEFAULT_INTERVALS = ["1m", "5m"]
+# 后端不可达时的周期兜底：必须覆盖 README 承诺的周期，否则 DEFAULT_INTERVAL=1w 会被静默丢弃
+DEFAULT_INTERVALS = ["1m", "5m", "1h", "1d", "1w", "1M", "1y"]
 
 PLOTLY_CONFIG = {"displayModeBar": False, "scrollZoom": True}
 
-SOURCE_COLORS = {"🟢 后端实时": "#26a69a", "🟡 本地缓存": "#ffb74d", "🔴 离线模拟": "#ef5350"}
+# 行情降级参数
+# 直连超时必须短：实时图 2 秒刷新一次，连接最长 6 秒会把刷新队列拖死
+DIRECT_TIMEOUT = (2.0, 4.0)
+# 直连失败后的负缓存：30 秒内不再重试（否则每次刷新都在等超时）
+DIRECT_RETRY_S = 30.0
+# 本地缓存落后超过约 10 根 K 线就算过期 → 改用明确标注的合成行情
+CACHE_MAX_BARS = 10
+
+SOURCE_COLORS = {
+    "🟢 后端实时": "#26a69a",
+    "🟡 后端数据滞后": "#ffb74d",
+    "🟡 本地缓存": "#ffb74d",
+    "🔴 离线模拟": "#ef5350",
+}
 STRATEGY_COLORS = {"grid": "#4fc3f7", "martingale": "#ffb74d", "trend": "#26a69a"}
 GREEN, RED, AMBER, BLUE, GREY = "#26a69a", "#ef5350", "#ffb74d", "#4fc3f7", "#9e9e9e"
 
@@ -222,7 +239,49 @@ def _iso_now() -> str:
 @st.cache_data(ttl=5, show_spinner=False)
 def fetch_direct_klines(symbol: str, interval: str, limit: int) -> list[dict]:
     """前端进程直连 Binance 公共 REST（给"没有后端"的云端部署兜底）。"""
-    return fetch_direct_klines_raw(symbol, interval, limit)
+    return fetch_direct_klines_raw(symbol, interval, limit, timeout=DIRECT_TIMEOUT)
+
+
+def fetch_direct_klines_guarded(symbol: str, interval: str, limit: int) -> list[dict]:
+    """带负缓存的直连：失败后 30 秒内不再尝试。
+
+    没有这层负缓存时，网络差的环境里每 5 秒就会发起一次最长 6 秒的连接，
+    而实时图是 2 秒刷新一次 —— 结果就是页面一直卡在"正在运行"，看起来像刷不出行情。
+    """
+    if st.session_state.get("_direct_down_until", 0.0) > time.time():
+        return []
+    candles = fetch_direct_klines(symbol, interval, limit)
+    if candles:
+        st.session_state["_direct_down_until"] = 0.0
+    else:
+        st.session_state["_direct_down_until"] = time.time() + DIRECT_RETRY_S
+    return candles
+
+
+def _cache_max_age_s(interval: str) -> float:
+    """缓存新鲜度阈值：落后超过 ~10 根 K 线就算过期。
+
+    1m 缓存超过 10 分钟、1d 缓存超过 10 天，画出来都是"冻住的历史"，
+    宁可换成明确标注的合成行情，也不假装它在实时更新。
+    """
+    try:
+        step = interval_ms(interval) / 1000.0
+    except Exception:  # noqa: BLE001
+        step = 60.0
+    return max(step * CACHE_MAX_BARS, 600.0)
+
+
+def _fmt_age(seconds: float | None) -> str:
+    if seconds is None:
+        return "—"
+    seconds = float(seconds)
+    if seconds < 120:
+        return f"{seconds:.0f}s"
+    if seconds < 7200:
+        return f"{seconds / 60:.0f}m"
+    if seconds < 172800:
+        return f"{seconds / 3600:.1f}h"
+    return f"{seconds / 86400:.1f}d"
 
 
 def resolve_data(base_url: str, symbol: str, interval: str, limit: int, offline: bool) -> dict:
@@ -239,15 +298,26 @@ def resolve_data(base_url: str, symbol: str, interval: str, limit: int, offline:
         try:
             payload = fetch_latest(base_url, symbol, interval, limit)
             st.session_state["_backend_down_until"] = 0.0
-            payload["ui_source"] = "🟢 后端实时"
-            payload["ui_note"] = None
+            # 后端 HTTP 活着不等于数据活着：WS 断线时后端会返回几小时前的缓存，
+            # 必须按 age_s 判断，否则页面会一直显示"后端实时"却画着冻结的行情。
+            age = payload.get("age_s")
+            step_s = interval_ms(interval) / 1000.0
+            lagging = bool(payload.get("stale")) or (age is not None and age > max(step_s * 2, 60.0))
+            if lagging:
+                payload["ui_source"] = "🟡 后端数据滞后"
+                payload["ui_note"] = (
+                    f"后端行情已 {_fmt_age(age)} 未更新（WebSocket 断线，后端正在用 REST 补数据并重连）"
+                )
+            else:
+                payload["ui_source"] = "🟢 后端实时"
+                payload["ui_note"] = None
             return payload
         except Exception as exc:  # noqa: BLE001
             st.session_state["_backend_down_until"] = now + 60.0
             note = f"后端不可达（{type(exc).__name__}），已切换到 Binance 直连"
 
     if not offline:
-        direct = fetch_direct_klines(symbol, interval, limit)
+        direct = fetch_direct_klines_guarded(symbol, interval, limit)
         if direct:
             return {
                 "symbol": symbol,
@@ -261,12 +331,42 @@ def resolve_data(base_url: str, symbol: str, interval: str, limit: int, offline:
                 "ui_source": "🟢 Binance 直连",
                 "ui_note": f"{note}；直连模式只提供行情（情绪/新闻需后端）",
             }
+        if st.session_state.get("_direct_down_until", 0.0) > now:
+            note = f"{note}；直连不可达（{DIRECT_RETRY_S:.0f} 秒内不再重试）"
 
     candles = load_local_candles(symbol, interval, limit)
+    cache_age_s: float | None = None
+    if candles:
+        cache_age_s = max((time.time() * 1000 - candles[-1]["t"]) / 1000.0, 0.0)
+    if candles and cache_age_s is not None and cache_age_s > _cache_max_age_s(interval):
+        # 缓存过期：宁可明确标注的合成行情，也不画一根 28 天前冻住的 1m K 线
+        stale_age = _fmt_age(cache_age_s)
+        candles = synthesize_candles(symbol, interval, limit)
+        ui_source = "🔴 离线模拟"
+        note = (
+            f"{note}；本地缓存已过期 {stale_age}，改用合成行情（非真实价格）"
+            if note
+            else f"本地缓存已过期 {stale_age}，改用合成行情（非真实价格）"
+        )
+        return {
+            "symbol": symbol,
+            "interval": interval,
+            "price": float(candles[-1]["c"]),
+            "candles": candles,
+            "count": len(candles),
+            "stale": True,
+            "age_s": 0.0,
+            "cache_age_s": cache_age_s,
+            "source": ui_source,
+            "ui_source": ui_source,
+            "ui_note": note,
+        }
+
     if candles:
         ui_source = "🟡 本地缓存"
         updated = datetime.fromtimestamp(candles[-1]["t"] / 1000).strftime("%Y-%m-%d %H:%M:%S")
-        note = f"{note}；缓存数据截止 {updated}" if note else f"缓存数据截止 {updated}"
+        age_text = _fmt_age(cache_age_s)
+        note = f"{note}；缓存数据截止 {updated}（{age_text}前）" if note else f"缓存数据截止 {updated}（{age_text}前）"
     else:
         candles = synthesize_candles(symbol, interval, limit)
         ui_source = "🔴 离线模拟"
@@ -279,7 +379,8 @@ def resolve_data(base_url: str, symbol: str, interval: str, limit: int, offline:
         "candles": candles,
         "count": len(candles),
         "stale": ui_source != "🟢 后端实时",
-        "age_s": None,
+        "age_s": cache_age_s,
+        "cache_age_s": cache_age_s,
         "source": ui_source,
         "ui_source": ui_source,
         "ui_note": note,
@@ -360,213 +461,44 @@ def ma_points(candles: list[dict], window: int) -> list[list[float]]:
     ]
 
 
-# ---------------------------------------------------------------- 图表
-def build_candle_figure(
+
+def render_trade_chart(
     candles: list[dict],
-    levels: list[float],
+    result: dict,
     symbol: str,
     interval: str,
-    height: int = 520,
-    uirevision: str = "live",
-    lines: list[dict] | None = None,
-) -> go.Figure:
-    frame = pd.DataFrame(candles)
-    frame["time"] = pd.to_datetime(frame["t"], unit="ms")
-    rising = frame["c"] >= frame["o"]
-    last_price = float(frame["c"].iloc[-1])
-
-    figure = make_subplots(
-        rows=2,
-        cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.04,
-        row_heights=[0.77, 0.23],
-    )
-    figure.add_trace(
-        go.Candlestick(
-            x=frame["time"],
-            open=frame["o"],
-            high=frame["h"],
-            low=frame["l"],
-            close=frame["c"],
-            name=symbol,
-            increasing=dict(line=dict(color=GREEN, width=1), fillcolor=GREEN),
-            decreasing=dict(line=dict(color=RED, width=1), fillcolor=RED),
-        ),
-        row=1,
-        col=1,
-    )
-    figure.add_trace(
-        go.Bar(
-            x=frame["time"],
-            y=frame["v"],
-            name="成交量",
-            marker_color=["rgba(38,166,154,0.40)" if up else "rgba(239,83,80,0.40)" for up in rising],
-            hovertemplate="成交量 %{y:,.2f}<extra></extra>",
-        ),
-        row=2,
-        col=1,
-    )
-
-    # 网格线按"在当前价之上/之下"着色：下方=买入区，上方=卖出区
-    for level in levels:
-        color = "rgba(38,166,154,0.34)" if level <= last_price else "rgba(255,183,77,0.30)"
-        figure.add_hline(y=level, line=dict(color=color, width=1, dash="dot"), row=1, col=1)
-
-    for line in lines or []:
-        points = line.get("points") or []
-        if not points:
-            continue
-        figure.add_trace(
-            go.Scatter(
-                x=pd.to_datetime([point[0] for point in points], unit="ms"),
-                y=[point[1] for point in points],
-                mode="lines",
-                name=line.get("name", "均线"),
-                line=dict(color=line.get("color", BLUE), width=1.4),
-                hovertemplate=line.get("name", "均线") + " %{y:,.2f}<extra></extra>",
-            ),
-            row=1,
-            col=1,
-        )
-
-    figure.add_hline(
-        y=last_price,
-        line=dict(color=AMBER, width=1.4),
-        annotation_text=f" 最新 {last_price:,.2f} ",
-        annotation_position="top left",
-        annotation_font=dict(color=AMBER, size=11),
-        row=1,
-        col=1,
-    )
-
-    figure.update_layout(
-        template="plotly_dark",
-        height=height,
-        margin=dict(l=8, r=10, t=64, b=6),
-        title=dict(
-            text=f"<b>{symbol}</b> · {interval_label(interval)} · {len(levels)} 条参考线"
-            if levels
-            else f"<b>{symbol}</b> · {interval_label(interval)}",
-            font=dict(size=14),
-            x=0.005,
-            y=0.985,
-            yanchor="top",
-        ),
-        showlegend=bool(lines),
-        legend=dict(orientation="h", y=1.04, x=0, font=dict(size=11)),
-        xaxis_rangeslider_visible=False,
-        hovermode="x unified",
-        bargap=0.1,
-        uirevision=uirevision,
-    )
-    if interval == "1d":
-        range_buttons = [
-            dict(count=7, label="7d", step="day", stepmode="backward"),
-            dict(count=30, label="30d", step="day", stepmode="backward"),
-            dict(step="all", label="全部"),
-        ]
-    elif interval == "1w":
-        # Plotly 的 rangeselector 不支持 step="week"，用天数换算：12 周 ≈ 84 天，52 周 ≈ 364 天
-        range_buttons = [
-            dict(count=84, label="12w", step="day", stepmode="backward"),
-            dict(count=364, label="1y", step="day", stepmode="backward"),
-            dict(step="all", label="全部"),
-        ]
-    elif interval == "1M":
-        range_buttons = [
-            dict(count=12, label="12M", step="month", stepmode="backward"),
-            dict(count=36, label="36M", step="month", stepmode="backward"),
-            dict(step="all", label="全部"),
-        ]
-    elif interval == "1y":
-        range_buttons = [
-            dict(count=5, label="5y", step="year", stepmode="backward"),
-            dict(step="all", label="全部"),
-        ]
-    else:
-        range_buttons = [
-            dict(count=30, label="30m", step="minute", stepmode="backward"),
-            dict(count=2, label="2h", step="hour", stepmode="backward"),
-            dict(step="all", label="全部"),
-        ]
-
-    figure.update_xaxes(
-        showgrid=False,
-        rangeselector=dict(
-            buttons=range_buttons,
-            bgcolor="rgba(255,255,255,0.05)",
-            activecolor="rgba(79,195,247,0.35)",
-            font=dict(size=10, color="#c9d1d9"),
-            x=1,
-            xanchor="right",
-            y=1.02,
-            yanchor="bottom",
-        ),
-        row=1,
-        col=1,
-    )
-    figure.update_yaxes(side="right", row=1, col=1)
-    figure.update_yaxes(side="right", row=2, col=1, showgrid=False)
-
-    # 纵轴以"实际价格走势"为主，只把附近的网格线纳入视野：
-    # 否则当网格区间远大于当日振幅时，蜡烛会被压成一条直线，完全看不清形态。
-    low_c = float(frame["l"].min())
-    high_c = float(frame["h"].max())
-    band = (high_c - low_c) * 0.4 or last_price * 0.002
-    near_levels = [level for level in levels if low_c - band <= level <= high_c + band]
-    lo = min([low_c, *near_levels]) if near_levels else low_c
-    hi = max([high_c, *near_levels]) if near_levels else high_c
-    pad = (hi - lo) * 0.03 or last_price * 0.002
-    figure.update_yaxes(range=[lo - pad, hi + pad], row=1, col=1)
-
-    return figure
-
-
-def build_trade_figure(candles: list[dict], result: dict, symbol: str, interval: str) -> go.Figure:
-    """K 线 + 参考线 + 每笔成交点：让策略行为肉眼可见。"""
+    indicators: dict | None = None,
+) -> None:
+    """K 线 + 参考线 + 每笔成交点 + 技术指标（与实时图共用同一套指标口径）。"""
     overlays = result.get("overlays") or {}
     levels = overlays.get("grid_levels") or (result.get("grid") or {}).get("levels", [])
     lines = overlays.get("lines") or []
-
-    figure = build_candle_figure(
-        candles,
-        levels,
+    overlay_lines, panes = _indicator_specs(candles, indicators or {})
+    trades = result.get("trades") or []
+    signature = (
         symbol,
         interval,
-        height=470,
-        uirevision=f"trade-{symbol}-{interval}",
-        lines=lines,
+        len(candles),
+        len(trades),
+        float((result.get("summary") or {}).get("total_return", 0.0) or 0.0),
+        tuple(sorted((indicators or {}).get("selected") or [])),
+        tuple((indicators or {}).get("ma_periods") or []),
     )
-
-    trades = result["trades"]
-    for side, color, marker_symbol, label in (
-        ("buy", GREEN, "triangle-up", "买入"),
-        ("sell", RED, "triangle-down", "卖出"),
-    ):
-        rows = [trade for trade in trades if trade["side"] == side]
-        if not rows:
-            continue
-        figure.add_trace(
-            go.Scatter(
-                x=pd.to_datetime([trade["t"] for trade in rows], unit="ms"),
-                y=[trade["price"] for trade in rows],
-                mode="markers",
-                name=f"{label} {len(rows)}",
-                marker=dict(
-                    symbol=marker_symbol,
-                    size=9,
-                    color=color,
-                    line=dict(color="rgba(0,0,0,0.55)", width=0.8),
-                ),
-                customdata=[[trade.get("reason") or ""] for trade in rows],
-                hovertemplate=f"{label} %{{y:,.2f}} · %{{customdata[0]}}<extra></extra>",
-            ),
-            row=1,
-            col=1,
-        )
-    figure.update_layout(title_text="", showlegend=True, legend=dict(orientation="h", y=1.04, x=0))
-    return figure
+    render_lwc_candles(
+        candles=candles,
+        levels=levels,
+        lines=lines,
+        markers=trades,
+        interval=interval,
+        height=470 + 110 * len(panes),
+        key=f"trade-{symbol}-{interval}",
+        overlay_lines=overlay_lines,
+        sub_panes=panes,
+        # 回测结果不变时不重建（保住缩放）；重跑回测后立即重画成交点和指标
+        force_reinit=_chart_should_reinit(
+            f"trade-{symbol}-{interval}", signature, min_interval=0.0
+        ),
+    )
 
 
 def build_equity_figure(equity_curve: list[dict]) -> go.Figure:
@@ -809,7 +741,7 @@ def render_backtest(result: dict, meta: dict, candles: list[dict]) -> None:
 
     st.markdown("##### 🎯 成交分布（买卖点回填到 K 线）")
     symbol = meta.get("symbol") or result.get("symbol") or ""
-    plotly_chart(build_trade_figure(candles, result, symbol, result["params"]["interval"]))
+    render_trade_chart(candles, result, symbol, result["params"]["interval"], live_ctx["indicators"])
 
     st.markdown("##### 📈 净值与回撤")
     plotly_chart(build_equity_figure(result["equity_curve"]))
@@ -1084,6 +1016,43 @@ with st.sidebar:
                 )
         st.caption(strategy_spec.description)
 
+    with st.expander("📐 技术指标", expanded=True):
+        indicator_choices = st.multiselect(
+            "叠加 / 副图指标",
+            ["MA", "BOLL", "MACD", "RSI", "KDJ"],
+            default=["MA", "BOLL", "MACD"],
+            help="MA/BOLL 叠在 K 线上；MACD/RSI/KDJ 各自占一个副图",
+        )
+        ma_periods: list[int] = [5, 20, 60]
+        boll_period = 20
+        boll_mult = 2.0
+        macd_fast, macd_slow, macd_signal = 12, 26, 9
+        rsi_period = 14
+        kdj_period = 9
+        if "MA" in indicator_choices:
+            raw_periods = st.text_input(
+                "MA 周期（逗号分隔）",
+                value="5,20,60",
+                key="ma_periods",
+                help="最多 6 条；数据不足的周期会自动跳过",
+            )
+            ma_periods = sorted(
+                {int(part) for part in raw_periods.replace("，", ",").split(",") if part.strip().isdigit() and 1 < int(part) <= 500}
+            )[:6]
+        if "BOLL" in indicator_choices:
+            boll_col, mult_col = st.columns(2)
+            boll_period = int(boll_col.number_input("BOLL 周期", 5, 200, 20, key="boll_period"))
+            boll_mult = float(mult_col.number_input("标准差倍数", 0.5, 4.0, 2.0, 0.1, key="boll_mult"))
+        if "MACD" in indicator_choices:
+            macd_c1, macd_c2, macd_c3 = st.columns(3)
+            macd_fast = int(macd_c1.number_input("MACD 快线", 2, 60, 12, key="macd_fast"))
+            macd_slow = int(macd_c2.number_input("MACD 慢线", 3, 120, 26, key="macd_slow"))
+            macd_signal = int(macd_c3.number_input("MACD 信号", 2, 60, 9, key="macd_signal"))
+        if "RSI" in indicator_choices:
+            rsi_period = int(st.number_input("RSI 周期", 2, 100, 14, key="rsi_period"))
+        if "KDJ" in indicator_choices:
+            kdj_period = int(st.number_input("KDJ 周期", 3, 100, 9, key="kdj_period"))
+
     with st.expander("💰 资金与费率", expanded=True):
         capital = st.number_input("初始资金 (USDT)", min_value=100.0, value=10_000.0, step=500.0)
         fee_default = 0.0005 if trading_mode == "futures" else 0.001
@@ -1179,6 +1148,125 @@ with header_right:
     st.caption(mode_text)
 
 
+INDICATOR_COLORS = ["#4fc3f7", "#ffb74d", "#26a69a", "#ef5350", "#9e9e9e", "#ba68c8"]
+# 这版图表组件没有增量更新，只能靠 forceReinit 重建；节流避免每 2 秒重建一次
+CHART_REFRESH_S = float(os.getenv("CHART_REFRESH_SECONDS", "5"))
+
+
+def _chart_should_reinit(scope: str, signature: tuple, min_interval: float | None = None) -> bool:
+    """数据变了才重建图表，且默认最多每 CHART_REFRESH_S 秒重建一次。
+
+    手动交易这种"用户点了才变"的场景传 `min_interval=0`：立即重建，不节流。
+    """
+    gap = CHART_REFRESH_S if min_interval is None else float(min_interval)
+    sig_key, ts_key = f"_chart_sig_{scope}", f"_chart_ts_{scope}"
+    now = time.time()
+    if st.session_state.get(sig_key) == signature:
+        return False
+    if now - float(st.session_state.get(ts_key, 0.0)) < gap:
+        return False
+    st.session_state[sig_key] = signature
+    st.session_state[ts_key] = now
+    return True
+
+
+def _indicator_specs(candles: list[dict], cfg: dict) -> tuple[list[dict], list[dict]]:
+    """把 K 线 + 指标配置翻译成图表要的「叠加线 / 副图」两串声明。
+
+    指标计算全在 `core/indicators.py`（纯函数、有单测），这里只做时间轴对齐与配色。
+    """
+    closes = [float(candle["c"]) for candle in candles]
+    times = [int(candle["t"]) for candle in candles]
+
+    def points(series: list[float | None]) -> list[list[float]]:
+        return [[ts, value] for ts, value in zip(times, series) if value is not None]
+
+    selected = set(cfg.get("selected") or [])
+    overlays: list[dict] = []
+    if "MA" in selected:
+        for index, period in enumerate(cfg.get("ma_periods") or []):
+            series = sma(closes, int(period))
+            if any(value is not None for value in series):
+                overlays.append(
+                    {
+                        "name": f"MA{period}",
+                        "color": INDICATOR_COLORS[index % len(INDICATOR_COLORS)],
+                        "points": points(series),
+                    }
+                )
+    if "BOLL" in selected:
+        bands = bollinger(closes, int(cfg.get("boll_period", 20)), float(cfg.get("boll_mult", 2.0)))
+        overlays.extend(
+            [
+                {"name": "BOLL 上轨", "color": "#90caf9", "points": points(bands["upper"]), "width": 1, "dashed": True},
+                {"name": "BOLL 中轨", "color": "#64b5f6", "points": points(bands["mid"]), "width": 1},
+                {"name": "BOLL 下轨", "color": "#90caf9", "points": points(bands["lower"]), "width": 1, "dashed": True},
+            ]
+        )
+
+    panes: list[dict] = []
+    pane_id = 2  # 0 = K 线，1 = 成交量
+    if "MACD" in selected:
+        result = macd(
+            closes,
+            int(cfg.get("macd_fast", 12)),
+            int(cfg.get("macd_slow", 26)),
+            int(cfg.get("macd_signal", 9)),
+        )
+        hist_points: list[list[float]] = []
+        hist_colors: list[str] = []
+        for ts, value in zip(times, result["hist"]):
+            if value is None:
+                continue
+            hist_points.append([ts, value])
+            hist_colors.append("rgba(38,166,154,0.55)" if value >= 0 else "rgba(239,83,80,0.55)")
+        panes.append(
+            {
+                "pane": pane_id,
+                "label": (
+                    f"MACD({cfg.get('macd_fast', 12)},{cfg.get('macd_slow', 26)},"
+                    f"{cfg.get('macd_signal', 9)}) · 柱=2×(DIF−DEA)"
+                ),
+                "hist": {"points": hist_points, "colors": hist_colors},
+                "lines": [
+                    {"name": "DIF", "color": "#ffb74d", "points": points(result["dif"])},
+                    {"name": "DEA", "color": "#4fc3f7", "points": points(result["dea"])},
+                ],
+            }
+        )
+        pane_id += 1
+    if "RSI" in selected:
+        series = rsi(closes, int(cfg.get("rsi_period", 14)))
+        panes.append(
+            {
+                "pane": pane_id,
+                "label": f"RSI({cfg.get('rsi_period', 14)})",
+                "lines": [{"name": f"RSI{cfg.get('rsi_period', 14)}", "color": "#ba68c8", "points": points(series)}],
+            }
+        )
+        pane_id += 1
+    if "KDJ" in selected:
+        result = kdj(
+            [float(candle["h"]) for candle in candles],
+            [float(candle["l"]) for candle in candles],
+            closes,
+            int(cfg.get("kdj_period", 9)),
+        )
+        panes.append(
+            {
+                "pane": pane_id,
+                "label": f"KDJ({cfg.get('kdj_period', 9)},3,3)",
+                "lines": [
+                    {"name": "K", "color": "#ffb74d", "points": points(result["k"])},
+                    {"name": "D", "color": "#4fc3f7", "points": points(result["d"])},
+                    {"name": "J", "color": "#ef5350", "points": points(result["j"])},
+                ],
+            }
+        )
+        pane_id += 1
+    return overlays, panes
+
+
 def render_live_body(ctx: dict) -> None:
     payload = resolve_data(
         ctx["base_url"], ctx["symbol"], ctx["interval"], ctx["limit"], ctx["offline"]
@@ -1204,7 +1292,7 @@ def render_live_body(ctx: dict) -> None:
 
     source_color = SOURCE_COLORS.get(payload["ui_source"], BLUE)
     change = (payload["price"] / candles[0]["o"] - 1) * 100 if candles else 0.0
-    age = f"{payload['age_s']:.1f}s" if payload.get("age_s") is not None else "—"
+    age = _fmt_age(payload.get("age_s"))
 
     chips = [
         status_pill(payload["ui_source"].split(" ", 1)[-1], source_color),
@@ -1229,16 +1317,37 @@ def render_live_body(ctx: dict) -> None:
     if payload.get("ui_note"):
         st.info(payload["ui_note"], icon="🛰️")
 
-    plotly_chart(
-        build_candle_figure(
-            candles,
-            levels,
-            ctx["symbol"],
-            ctx["interval"],
-            uirevision=f"{ctx['symbol']}-{ctx['interval']}-{strategy}",
-            lines=lines,
-        )
+    overlays, panes = _indicator_specs(candles, ctx["indicators"])
+    height = 520 + 110 * len(panes)
+    last = candles[-1]
+    signature = (
+        ctx["symbol"],
+        ctx["interval"],
+        len(candles),
+        int(last["t"]),
+        round(float(last["c"]), 2),
+        tuple(sorted(ctx["indicators"].get("selected") or [])),
+        tuple(ctx["indicators"].get("ma_periods") or []),
+        ctx["indicators"].get("boll_period"),
+        ctx["indicators"].get("macd_fast"),
+        ctx["indicators"].get("rsi_period"),
+        ctx["indicators"].get("kdj_period"),
     )
+    force_reinit = _chart_should_reinit(f"live-{ctx['symbol']}-{ctx['interval']}", signature)
+
+    if not render_lwc_candles(
+        candles=candles,
+        levels=levels,
+        lines=lines,
+        interval=ctx["interval"],
+        height=height,
+        # key 必须稳定：LWC 靠它保存 series 配置，否则 2 秒刷新会把缩放弹回默认
+        key=f"live-{ctx['symbol']}-{ctx['interval']}-{strategy}",
+        overlay_lines=overlays,
+        sub_panes=panes,
+        force_reinit=force_reinit,
+    ):
+        st.warning("当前没有可渲染的 K 线数据。", icon="📉")
 
     with st.expander("🩺 后端连接详情（/api/health）", expanded=False):
         if ctx["offline"]:
@@ -1261,6 +1370,257 @@ def live_panel_manual(ctx: dict) -> None:
     render_live_body(ctx)
 
 
+# ---------------------------------------------------------------- 手动交易
+MANUAL_KEY = "manual_account"
+
+
+def get_manual_account(symbol: str, capital: float) -> ManualAccount:
+    """按交易对加载/新建账户：同一个交易对刷新页面不丢仓位（存档在 data/manual/）。"""
+    account = st.session_state.get(MANUAL_KEY)
+    if account is None or account.symbol != str(symbol).upper():
+        account = ManualAccount.load_or_create(
+            symbol, capital=float(max(capital, 100.0)), leverage=20.0
+        )
+        st.session_state[MANUAL_KEY] = account
+    return account
+
+
+def _apply_budget_ratio(ratio: float, cash_available: float) -> None:
+    """快捷仓位按钮：改保证金输入框的值（回调里改，避免 widget 已实例化后报错）。"""
+    amount = max(float(cash_available) * float(ratio), 1.0)
+    st.session_state["manual_margin"] = float(round(amount, 2))
+
+
+def _manual_records_frame(records: list[dict]) -> pd.DataFrame:
+    if not records:
+        return pd.DataFrame()
+    frame = pd.DataFrame(records[-12:]).iloc[::-1]
+    frame["时间"] = pd.to_datetime(frame["t"], unit="ms").dt.strftime("%m-%d %H:%M:%S")
+    frame["动作"] = frame["reason"].fillna("")
+    frame["方向"] = frame["position"].map({"long": "多", "short": "空"}).fillna("—")
+    frame["价格"] = frame["price"].map(lambda value: f"{value:,.2f}")
+    frame["数量"] = frame["qty"].map(lambda value: f"{value:,.4f}")
+    frame["盈亏"] = frame["pnl"].map(lambda value: "—" if pd.isna(value) else f"{value:+,.2f}")
+    return frame[["时间", "动作", "方向", "价格", "数量", "盈亏", "side"]].rename(columns={"side": "买卖"})
+
+
+def render_manual_body(ctx: dict) -> None:
+    payload = resolve_data(
+        ctx["base_url"], ctx["symbol"], ctx["interval"], ctx["limit"], ctx["offline"]
+    )
+    candles = payload["candles"]
+    price = float(payload["price"])
+    account = get_manual_account(ctx["symbol"], ctx["capital"])
+
+    # 先推进账户（资金费 + 强平），再读快照
+    event = account.tick(price, now_ms())
+    if event["liquidations"]:
+        account.save()
+        for record in event["liquidations"]:
+            st.toast(f"💥 强平：{record['reason']}", icon="🚨")
+    elif abs(event["funding"]) > 1e-9:
+        account.save()
+
+    snapshot = account.snapshot(price)
+    flat = snapshot["position"] == "flat"
+
+    st.markdown(
+        status_pill(f"最新价 {price:,.2f}", BLUE)
+        + status_pill(f"{account.leverage:.0f}x", RED)
+        + status_pill("模拟盘 · 不接真实资金", GREY)
+        + status_pill(f"存档 {account.path.name}", GREY),
+        unsafe_allow_html=True,
+    )
+
+    order_col, position_col = st.columns([1, 1.45], gap="medium")
+
+    with order_col:
+        st.markdown("##### 📝 下单")
+        side_label = st.radio(
+            "方向",
+            ["做多", "做空"],
+            horizontal=True,
+            index=0,
+            key="manual_side",
+            help="做空只在合约模式可用；强平价在开仓价上方",
+        )
+        side = "long" if side_label == "做多" else "short"
+
+        leverage_value = st.slider(
+            "手动杠杆倍数",
+            1,
+            100,
+            int(min(max(account.leverage, 1), 100)),
+            1,
+            key="manual_leverage",
+            disabled=not flat,
+            help="有持仓时杠杆锁定（强平价按建仓杠杆计算）；1x 无杠杆，100x 反向 0.5% 即爆仓",
+        )
+
+        cash_available = max(snapshot["cash"], 0.0)
+        default_margin = min(cash_available, max(cash_available * 0.25, 10.0)) if cash_available else 10.0
+        margin = st.number_input(
+            "保证金 (USDT)",
+            min_value=1.0,
+            max_value=max(cash_available, 1.0),
+            value=float(round(default_margin, 2)),
+            step=10.0,
+            key="manual_margin",
+            help=f"可用现金 {cash_available:,.2f}；开仓名义价值 = 保证金 × 杠杆，手续费按名义价值收",
+        )
+        q1, q2, q3 = st.columns(3)
+        for column, ratio in ((q1, 0.25), (q2, 0.5), (q3, 1.0)):
+            column.button(
+                f"{int(ratio * 100)}%",
+                key=f"manual_budget_{int(ratio * 100)}",
+                width="stretch",
+                # 必须用回调：脚本运行之后再改 number_input 的 session_state 会抛异常
+                on_click=_apply_budget_ratio,
+                args=(ratio, cash_available),
+            )
+
+        st.caption(
+            f"名义价值约 {margin * account.leverage:,.2f} USDT · "
+            f"单边手续费约 {margin * account.leverage * account.ledger.config.fee_rate:,.2f} USDT"
+        )
+
+        opposite = snapshot["position"] not in ("flat", side)
+        if st.button(
+            f"🚀 开{side_label}",
+            type="primary",
+            width="stretch",
+            disabled=opposite or not snapshot["can_open"],
+            key="manual_open",
+        ):
+            try:
+                account.set_leverage(leverage_value)
+                account.open(side, price, now_ms(), margin_usdt=float(margin))
+                account.save()
+            except ValueError as exc:
+                st.error(f"下单被拒绝：{exc}", icon="🚨")
+            else:
+                st.toast(f"{side_label}开仓成功 · {margin:,.0f} USDT @ {price:,.2f}", icon="✅")
+                # 动作后立即重算：本次运行下方持仓卡片就会显示新持仓（不必等 2 秒自动刷新）
+                snapshot = account.snapshot(price)
+                flat = snapshot["position"] == "flat"
+        if opposite:
+            st.caption("已有反向持仓：先平仓再反手，避免一个账户同时持有两个方向的仓位。")
+
+        if st.button(
+            "🧯 全部平仓",
+            width="stretch",
+            disabled=flat,
+            key="manual_close",
+        ):
+            account.close(price, now_ms())
+            account.save()
+            st.toast("已平仓", icon="✅")
+            snapshot = account.snapshot(price)
+            flat = snapshot["position"] == "flat"
+
+        with st.expander("⚙️ 账户设置", expanded=False):
+            st.caption(f"初始资金 {account.ledger.config.initial_capital:,.0f} USDT · 手续费 {account.ledger.config.fee_rate * 100:.3f}% · 维持保证金率 {account.ledger.config.maintenance_margin * 100:.1f}%")
+            st.caption(f"账户存档：{account.path}")
+            if st.button("🔄 重置账户（清零重开）", width="stretch", key="manual_reset"):
+                fresh = ManualAccount.create(
+                    ctx["symbol"], capital=float(max(ctx["capital"], 100.0)), leverage=20.0
+                )
+                fresh.save(account.path)
+                st.session_state[MANUAL_KEY] = fresh
+                account = fresh
+                snapshot = account.snapshot(price)
+                flat = True
+                st.toast("账户已重置", icon="🔄")
+
+    with position_col:
+        st.markdown("##### 📊 持仓")
+        metric_a, metric_b = st.columns(2)
+        metric_a.metric("账户权益", f"{snapshot['equity']:,.2f} USDT")
+        metric_b.metric(
+            "未实现盈亏",
+            f"{snapshot['unrealized_pnl']:+,.2f}",
+            f"{snapshot['unrealized_pct_of_margin'] * 100:+.2f}% / 保证金" if not flat else None,
+        )
+        metric_c, metric_d = st.columns(2)
+        metric_c.metric("保证金占用率", f"{snapshot['risk_ratio'] * 100:.1f}%")
+        metric_d.metric(
+            "距强平",
+            f"{snapshot['liq_distance_pct'] * 100:.2f}%" if snapshot["liq_distance_pct"] is not None else "—",
+        )
+
+        if flat:
+            st.caption(
+                f"空仓 · 可用现金 {snapshot['cash']:,.2f} USDT · 累计手续费 {snapshot['total_fees']:,.2f}"
+            )
+        else:
+            position_text = "多" if snapshot["position"] == "long" else "空"
+            st.caption(
+                f"{position_text} {snapshot['qty']:,.4f} 个 · 均价 {snapshot['avg_entry']:,.2f} · "
+                f"名义 {snapshot['notional']:,.2f} · 强平价 {snapshot['liq_price']:,.2f} · "
+                f"占用保证金 {snapshot['locked_margin']:,.2f}"
+            )
+            st.caption(
+                f"已实现盈亏 {snapshot['realized_pnl']:+,.2f} · 累计资金费 {snapshot['funding_paid']:+,.2f} · "
+                f"强平次数 {snapshot['liquidation_count']}"
+            )
+
+        for item in snapshot["warnings"]:
+            level = item.get("level")
+            text = item.get("text", "")
+            if level == "error":
+                st.error(text, icon="🚨")
+            elif level == "warning":
+                st.warning(text, icon="⚠️")
+            else:
+                st.info(text, icon="💸")
+
+    price_lines: list[dict] = []
+    if snapshot["liq_price"] is not None:
+        price_lines.append(
+            {"price": snapshot["liq_price"], "color": RED, "title": "强平价", "width": 2}
+        )
+    if snapshot["position"] in ("long", "short") and snapshot["avg_entry"] > 0:
+        price_lines.append(
+            {"price": snapshot["avg_entry"], "color": BLUE, "title": "开仓均价", "width": 1}
+        )
+
+    manual_signature = (
+        len(account.records),
+        snapshot["position"],
+        round(float(snapshot["liq_price"] or 0.0), 2),
+    )
+    render_lwc_candles(
+        candles=candles,
+        levels=[],
+        lines=[],
+        markers=account.records[-40:],
+        interval=ctx["interval"],
+        height=430,
+        key=f"manual-{ctx['symbol']}-{ctx['interval']}",
+        price_lines=price_lines,
+        # 手动交易是"点了才变"，不节流：开平仓后立刻重画，才能马上看到成交点和强平线
+        force_reinit=_chart_should_reinit(
+            f"manual-{ctx['symbol']}-{ctx['interval']}", manual_signature, min_interval=0.0
+        ),
+    )
+
+    st.markdown("##### 🧾 成交与爆仓记录")
+    frame = _manual_records_frame(account.records)
+    if frame.empty:
+        st.caption("还没有成交。开仓后会在这里看到每一笔的真实盈亏（含双边手续费）。")
+    else:
+        show_table(frame)
+
+
+@st.fragment(run_every="2s")
+def manual_panel_auto(ctx: dict) -> None:
+    render_manual_body(ctx)
+
+
+def manual_panel(ctx: dict) -> None:
+    render_manual_body(ctx)
+
+
 live_ctx = {
     "base_url": backend_url,
     "symbol": symbol,
@@ -1273,15 +1633,35 @@ live_ctx = {
     "mode": trading_mode,
     "leverage": leverage,
     "direction": direction,
+    "capital": float(capital),
+    "indicators": {
+        "selected": indicator_choices,
+        "ma_periods": ma_periods,
+        "boll_period": boll_period,
+        "boll_mult": boll_mult,
+        "macd_fast": macd_fast,
+        "macd_slow": macd_slow,
+        "macd_signal": macd_signal,
+        "rsi_period": rsi_period,
+        "kdj_period": kdj_period,
+    },
 }
 
-tab_live, tab_backtest, tab_mood = st.tabs(["📊 实时行情", "🧮 回测分析", "🧠 情绪 · 新闻"])
+tab_live, tab_manual, tab_backtest, tab_mood = st.tabs(
+    ["📊 实时行情", "💼 手动交易", "🧮 回测分析", "🧠 情绪 · 新闻"]
+)
 
 with tab_live:
     if paused:
         live_panel_manual(live_ctx)
     else:
         live_panel_auto(live_ctx)
+
+with tab_manual:
+    if paused:
+        manual_panel(live_ctx)
+    else:
+        manual_panel_auto(live_ctx)
 
 with tab_backtest:
     payload = st.session_state.get("_last_payload")

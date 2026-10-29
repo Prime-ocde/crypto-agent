@@ -7,15 +7,18 @@
 - **合约双向**：`margin = notional / leverage`，手续费按名义价值收；
   - 多头晕平价：`entry × (1 − 1/leverage + 维持保证金率)`，最低价击穿即爆；
   - 空头晕平价：`entry × (1 + 1/leverage − 维持保证金率)`，最高价击穿即爆；
+  - **杠杆按笔锁定**：建仓时把当时的杠杆写进 lot，之后即使配置里的杠杆变了，
+    这笔仓位的强平价也不会被追溯改写（真实交易所同样是按开仓杠杆计算）；
 - **资金费**：按**净头寸**名义价值每 8 小时结算，多头支付、空头收取；
-- **权益**：`equity = 可用现金 + 占用保证金 + Σ 方向相关的未实现盈亏`。
+- **权益**：`equity = 可用现金 + 占用保证金 + Σ 方向相关的未实现盈亏`；
+- **可序列化**：`to_dict()` / `from_dict()` 让账本可以落盘（手动交易账户用）。
 
 账本只负责"记账 + 风险"，策略负责"什么时候开、什么时候平"。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from core.candles import iso_time
@@ -39,8 +42,8 @@ class TradeConfig:
     def validate(self) -> None:
         if self.mode not in VALID_MODES:
             raise ValueError(f"交易模式必须是 {' / '.join(VALID_MODES)}，收到 {self.mode!r}")
-        if not 1.0 <= self.leverage <= 50.0:
-            raise ValueError("杠杆倍数应在 [1, 50] 之间")
+        if not 1.0 <= self.leverage <= 100.0:
+            raise ValueError("杠杆倍数应在 [1, 100] 之间")
         if self.mode == "spot" and self.leverage != 1.0:
             raise ValueError("现货模式不能设置杠杆，请切换到合约模式")
         if not 0.0 <= self.fee_rate < 0.05:
@@ -161,6 +164,8 @@ class Ledger:
             "notional": notional,
             "reason": reason,
             "scaled": notional < desired_notional - 1e-9,
+            # 建仓时锁定的杠杆：之后改配置也不会改写这笔仓位的强平价
+            "leverage": self.leverage,
         }
         if meta:
             lot.update(meta)
@@ -277,10 +282,20 @@ class Ledger:
         ]
 
     # ---------------- 强平与资金费率 ----------------
+    @staticmethod
+    def lot_leverage(lot: dict, fallback: float) -> float:
+        """这笔仓位的杠杆：优先用建仓时锁定的值，兼容没有该字段的旧数据。"""
+        try:
+            value = float(lot.get("leverage") or 0.0)
+        except (TypeError, ValueError):
+            value = 0.0
+        return value if value > 0 else fallback
+
     def liquidation_price(self, lot: dict) -> float:
+        leverage = self.lot_leverage(lot, self.leverage)
         if lot["side"] == "long":
-            return lot["price"] * (1.0 - 1.0 / self.leverage + self.config.maintenance_margin)
-        return lot["price"] * (1.0 + 1.0 / self.leverage - self.config.maintenance_margin)
+            return lot["price"] * (1.0 - 1.0 / leverage + self.config.maintenance_margin)
+        return lot["price"] * (1.0 + 1.0 / leverage - self.config.maintenance_margin)
 
     def check_liquidation(self, low: float, high: float, ts: int) -> list[dict]:
         """合约强平：多头看最低价、空头看最高价。"""
@@ -299,6 +314,7 @@ class Ledger:
             loss = lot["margin"] + lot["fee"]
             self.realized_pnl -= loss
             self.liquidation_count += 1
+            lot_leverage = self.lot_leverage(lot, self.leverage)
             records.append(
                 {
                     "t": ts,
@@ -313,7 +329,7 @@ class Ledger:
                     "entry_price": lot["price"],
                     "entry_t": lot["t"],
                     "entry_time": iso_time(lot["t"]),
-                    "reason": f"强平（{self.leverage:.0f}x {'多' if lot['side'] == 'long' else '空'}）",
+                    "reason": f"强平（{lot_leverage:.0f}x {'多' if lot['side'] == 'long' else '空'}）",
                     "level": lot.get("level"),
                     "margin": lot["margin"],
                 }
@@ -351,3 +367,38 @@ class Ledger:
             "funding_paid": self.funding_paid,
             "open_position_side": self.position_side(),
         }
+
+    # ---------------- 序列化（落盘 / 恢复） ----------------
+    def to_dict(self) -> dict:
+        """把账本状态导出成可 JSON 化的字典（不含任何网络/时间依赖）。"""
+        return {
+            "config": asdict(self.config),
+            "cash": self.cash,
+            "lots": [dict(lot) for lot in self.lots],
+            "total_fees": self.total_fees,
+            "funding_paid": self.funding_paid,
+            "realized_pnl": self.realized_pnl,
+            "liquidation_count": self.liquidation_count,
+            "last_funding_ts": self._last_funding_ts,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Ledger":
+        """从 `to_dict()` 的结果恢复；字段缺失或非法直接抛 ValueError。"""
+        config_data = data.get("config")
+        if not isinstance(config_data, dict):
+            raise ValueError("账本数据缺少 config")
+        config = TradeConfig(**config_data)
+        ledger = cls(config)  # 构造函数里会 validate
+        ledger.cash = float(data.get("cash", config.initial_capital))
+        ledger.total_fees = float(data.get("total_fees", 0.0))
+        ledger.funding_paid = float(data.get("funding_paid", 0.0))
+        ledger.realized_pnl = float(data.get("realized_pnl", 0.0))
+        ledger.liquidation_count = int(data.get("liquidation_count", 0))
+        last_ts = data.get("last_funding_ts")
+        ledger._last_funding_ts = int(last_ts) if last_ts is not None else None
+        lots = data.get("lots") or []
+        if not isinstance(lots, list):
+            raise ValueError("账本数据 lots 必须是列表")
+        ledger.lots = [dict(lot) for lot in lots if isinstance(lot, dict)]
+        return ledger

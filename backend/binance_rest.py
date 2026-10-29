@@ -1,7 +1,8 @@
 """Binance 公共 REST 行情：启动预热 + 离线 CSV 缓存兜底。
 
-不用 API Key：只读 `/api/v3/klines`。如果主域名被墙，自动降级到
-`data-api.binance.vision`（币安官方公共只读域名，国内通常更稳）。
+不用 API Key：只读 `/api/v3/klines`。阶段二起主域名统一为
+`data-api.binance.vision`（币安官方"仅公共行情"域名，通常更通），
+仅在它不可达时才降级到 `api.binance.com`。
 """
 
 from __future__ import annotations

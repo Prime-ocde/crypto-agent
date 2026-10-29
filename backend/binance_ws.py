@@ -58,7 +58,8 @@ class BinanceKlineFeed:
     # ---------------- URL ----------------
     @property
     def endpoints(self) -> list[str]:
-        """主域名 + 备用域名。校园网/机房封 `stream.binance.com` 时自动切到备用域名。"""
+        """主域名 + 备用域名。阶段二起主域名是 `data-stream.binance.vision`，
+        不可达时按顺序切到 `stream.binance.com` 的备用地址。"""
         bases = (self.settings.ws_url, *self.settings.ws_fallbacks)
         streams = "/".join(
             f"{symbol.lower()}@kline_{interval}" for symbol, interval in self.settings.stream_keys

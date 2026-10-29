@@ -24,6 +24,8 @@ env/
 # 运行时产物
 data/*.csv
 data/*.json
+# 手动交易账户存档（本地模拟盘状态，不入库）
+data/manual/
 logs/
 *.log
 

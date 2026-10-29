@@ -10,6 +10,9 @@ numpy>=1.26.0
 # ===== 前端 / 可视化 =====
 # st.fragment(run_every=...) 需要 1.37+；width="stretch" 需要 1.49+
 streamlit>=1.49.0
+# 阶段二：K 线改用 TradingView Lightweight Charts（0.3.0 起 API 变为 Chart/Series 类）
+streamlit-lightweight-charts-pro>=0.3.0,<0.4
+# 阶段三迁移完剩余 4 张 Plotly 图后删除 plotly
 plotly>=5.24.0
 requests>=2.32.0
 
