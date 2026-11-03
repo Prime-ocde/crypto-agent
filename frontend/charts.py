@@ -259,6 +259,7 @@ def build_chart(
     overlay_lines: Iterable[dict] | None = None,
     sub_panes: Iterable[dict] | None = None,
     force_reinit: bool = False,
+    price_title: str = "最新",
 ) -> Chart | None:
     """组装 Chart 对象；数据为空返回 None（由调用方显示空状态）。
 
@@ -327,7 +328,9 @@ def build_chart(
             line_width=2,
             line_style=LineStyle.SOLID,
             axis_label_visible=True,
-            title="最新",
+            # 标签里带「数据时刻」：这版组件只能整图重建，标签天然落后于顶部实时价，
+            # 写明时刻比让人猜"为什么不一致"要好
+            title=price_title,
             axis_label_text_color="#1b1f27",
         )
     )
@@ -429,6 +432,7 @@ def render_candles(
     overlay_lines: Iterable[dict] | None = None,
     sub_panes: Iterable[dict] | None = None,
     force_reinit: bool = False,
+    price_title: str = "最新",
 ) -> bool:
     """渲染 K 线；key 必须稳定，否则每次 rerun 都会重建组件（缩放/平移丢失）。
 
@@ -455,6 +459,7 @@ def render_candles(
         overlay_lines=overlay_lines,
         sub_panes=sub_panes,
         force_reinit=force_reinit,
+        price_title=price_title,
     )
     if chart is None:
         return False

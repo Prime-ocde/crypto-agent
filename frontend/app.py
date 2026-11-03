@@ -1185,8 +1185,9 @@ with header_right:
 
 
 INDICATOR_COLORS = ["#4fc3f7", "#ffb74d", "#26a69a", "#ef5350", "#9e9e9e", "#ba68c8"]
-# 这版图表组件没有增量更新，只能靠 forceReinit 重建；节流避免每 2 秒重建一次
-CHART_REFRESH_S = float(os.getenv("CHART_REFRESH_SECONDS", "5"))
+# 这版图表组件没有增量更新，只能靠 forceReinit 重建；默认 2 秒与轮询同频，
+# 这样图上的「最新」价格与顶部芯片最多差一个轮询周期（想保住缩放就把这个值调大）
+CHART_REFRESH_S = float(os.getenv("CHART_REFRESH_SECONDS", "2"))
 
 
 def _chart_should_reinit(scope: str, signature: tuple, min_interval: float | None = None) -> bool:
@@ -1370,6 +1371,13 @@ def render_live_body(ctx: dict) -> None:
         ctx["indicators"].get("kdj_period"),
     )
     force_reinit = _chart_should_reinit(f"live-{ctx['symbol']}-{ctx['interval']}", signature)
+    # 图上「最新」标签带数据时刻：组件只能整图重建，标签天然落后于顶部实时价，
+    # 写明 "最新 @ 15:02:11" 一眼就能看出这是哪一刻的价格，而不是以为算错了。
+    price_title = (
+        f"最新 @ {datetime.fromtimestamp(last['t'] / 1000).strftime('%H:%M:%S')}"
+        if interval_ms(ctx["interval"]) >= 60_000
+        else "最新"
+    )
 
     if not render_lwc_candles(
         candles=candles,
@@ -1382,6 +1390,7 @@ def render_live_body(ctx: dict) -> None:
         overlay_lines=overlays,
         sub_panes=panes,
         force_reinit=force_reinit,
+        price_title=price_title,
     ):
         st.warning("当前没有可渲染的 K 线数据。", icon="📉")
 
