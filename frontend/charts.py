@@ -36,6 +36,7 @@ from lightweight_charts_pro.charts.options.ui_options import (
     TimeRange,
 )
 from streamlit_lightweight_charts_pro import (
+    AreaSeries,
     CandlestickData,
     CandlestickSeries,
     Chart,
@@ -230,7 +231,7 @@ def range_presets(interval: str) -> list[RangeConfig]:
     return [RangeConfig(text=label, range=value) for label, value in [*chosen, ("全部", TimeRange.ALL)]]
 
 
-def build_options(interval: str, height: int = 520) -> ChartOptions:
+def build_options(interval: str, height: int = 520, with_range_switcher: bool = True) -> ChartOptions:
     options = ChartOptions(height=height)  # auto_size 默认 True：宽度跟随 Streamlit 容器
     # 该版本前端的 layout 只读取 `panes`（源码：applyOptions({layout:{panes}}）），
     # background / paneHeights 都会被忽略，所以这里只设置确实生效的文字与网格颜色。
@@ -243,7 +244,11 @@ def build_options(interval: str, height: int = 520) -> ChartOptions:
     options.right_price_scale.text_color = TEXT_COLOR
     options.right_price_scale.scale_margins.top = 0.08
     options.right_price_scale.scale_margins.bottom = 0.08
-    options.range_switcher = RangeSwitcherOptions(visible=True, ranges=range_presets(interval))
+    options.range_switcher = (
+        RangeSwitcherOptions(visible=True, ranges=range_presets(interval))
+        if with_range_switcher
+        else None
+    )
     return options
 
 
@@ -464,4 +469,69 @@ def render_candles(
     if chart is None:
         return False
     chart.render(key=render_key)
+    return True
+
+
+def render_lines(
+    series: Iterable[dict],
+    key: str,
+    height: int = 420,
+    reference_lines: Iterable[dict] | None = None,
+    force_reinit: bool = True,
+) -> bool:
+    """通用折线/面积图（净值、回撤、策略对比、情绪曲线都走这里）。
+
+    `series` 每项：`{"name","color","points":[[ms, value]], "pane": 0, "type": "line|area"}`。
+    与 K 线图共用同一套主题、时间轴与价格线能力，只是没有蜡烛和成交量。
+    """
+    built: list[Any] = []
+    for spec in series:
+        points = to_line(spec.get("points") or [])
+        if not points:
+            continue
+        pane = int(spec.get("pane", 0))
+        scale_id = f"pane{pane}"
+        item: Any
+        if spec.get("type") == "area":
+            item = AreaSeries(data=points, price_scale_id=scale_id, pane_id=pane)
+            item.top_color = spec.get("fill", "rgba(239,83,80,0.25)")
+            item.bottom_color = spec.get("fill_bottom", "rgba(239,83,80,0.02)")
+        else:
+            item = LineSeries(data=points, price_scale_id=scale_id, pane_id=pane)
+        item.line_options = LineOptions(
+            color=spec.get("color", BLUE),
+            line_width=int(spec.get("width", 2)),
+        )
+        item.price_line_visible = False
+        item.last_value_visible = False
+        if spec.get("name"):
+            item.title = str(spec["name"])
+        built.append(item)
+
+    if not built:
+        return False
+
+    for ref in reference_lines or []:
+        try:
+            price = float(ref.get("price"))
+        except (TypeError, ValueError):
+            continue
+        built[0].add_price_line(
+            PriceLineOptions(
+                price=price,
+                color=ref.get("color", GREY),
+                line_width=1,
+                line_style=LineStyle.DOTTED,
+                axis_label_visible=True,
+                title=str(ref.get("title", "")),
+            )
+        )
+
+    chart = StableChart(
+        series=built,
+        options=build_options("1d", height, with_range_switcher=False),
+        chart_id=key,
+    )
+    chart.force_reinit = bool(force_reinit)
+    chart.render(key=key)
     return True

@@ -23,10 +23,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
-import plotly.graph_objects as go
 import requests
 import streamlit as st
-from plotly.subplots import make_subplots
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -43,6 +41,7 @@ from core.strategy_registry import run_backtest as run_strategy_backtest  # noqa
 from core.synthetic import default_base_price, synthesize_candles  # noqa: E402
 from core.timeframe import interval_label, interval_ms  # noqa: E402
 from frontend.charts import render_candles as render_lwc_candles  # noqa: E402
+from frontend.charts import render_lines as render_lwc_lines  # noqa: E402
 
 DATA_DIR = ROOT / "data"
 DEFAULT_BACKEND = "http://127.0.0.1:8000"
@@ -50,7 +49,6 @@ DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"]
 # 后端不可达时的周期兜底：必须覆盖 README 承诺的周期，否则 DEFAULT_INTERVAL=1w 会被静默丢弃
 DEFAULT_INTERVALS = ["1m", "5m", "1h", "1d", "1w", "1M", "1y"]
 
-PLOTLY_CONFIG = {"displayModeBar": False, "scrollZoom": True}
 
 # 行情降级参数
 # 直连超时必须短：实时图 2 秒刷新一次，连接最长 6 秒会把刷新队列拖死
@@ -432,13 +430,6 @@ def probe_price(base_url: str, symbol: str, interval: str, offline: bool) -> flo
         return default_base_price(symbol)
 
 
-def plotly_chart(fig: go.Figure) -> None:
-    """兼容新旧 Streamlit：1.49+ 用 width='stretch'，老版本回退到 use_container_width。"""
-    try:
-        st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
-    except TypeError:
-        st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
-
 
 def show_table(frame: pd.DataFrame, column_config: dict | None = None) -> None:
     kwargs = {"hide_index": True}
@@ -537,155 +528,108 @@ def render_trade_chart(
     )
 
 
-def build_equity_figure(equity_curve: list[dict]) -> go.Figure:
-    frame = pd.DataFrame(equity_curve)
-    frame["time"] = pd.to_datetime(frame["t"], unit="ms")
-    frame["peak"] = frame["equity"].cummax()
-    frame["drawdown"] = frame["equity"] / frame["peak"] - 1.0
+def render_equity_chart(equity_curve: list[dict], height: int = 420) -> None:
+    """净值曲线 + 回撤（两个 pane，替代 Plotly 的 make_subplots 双行）。"""
+    if not equity_curve:
+        return
+    equity_points: list[list[float]] = []
+    drawdown_points: list[list[float]] = []
+    peak = 0.0
+    for item in equity_curve:
+        equity = float(item["equity"])
+        peak = max(peak, equity)
+        equity_points.append([int(item["t"]), equity])
+        drawdown_points.append([int(item["t"]), (equity / peak - 1.0) * 100.0 if peak else 0.0])
 
-    figure = make_subplots(
-        rows=2,
-        cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.06,
-        row_heights=[0.66, 0.34],
-        subplot_titles=("策略净值曲线", "回撤"),
-    )
-    figure.add_trace(
-        go.Scatter(
-            x=frame["time"],
-            y=frame["equity"],
-            mode="lines",
-            name="净值",
-            line=dict(color=BLUE, width=2),
-            hovertemplate="净值 %{y:,.2f}<extra></extra>",
-        ),
-        row=1,
-        col=1,
-    )
-    figure.add_trace(
-        go.Scatter(
-            x=frame["time"],
-            y=frame["drawdown"] * 100,
-            mode="lines",
-            name="回撤 %",
-            line=dict(color=RED, width=1.2),
-            fill="tozeroy",
-            fillcolor="rgba(239,83,80,0.18)",
-            hovertemplate="回撤 %{y:.2f}%<extra></extra>",
-        ),
-        row=2,
-        col=1,
-    )
-    figure.update_layout(
-        template="plotly_dark",
-        height=420,
-        margin=dict(l=8, r=10, t=46, b=6),
-        showlegend=False,
-        hovermode="x unified",
-        uirevision="equity",
-    )
-    figure.update_yaxes(side="right", row=1, col=1)
-    figure.update_yaxes(side="right", row=2, col=1, ticksuffix="%")
-
-    equity = frame["equity"]
-    low, high = float(equity.min()), float(equity.max())
-    span = (high - low) or max(abs(high) * 0.001, 1.0)
-    figure.update_yaxes(range=[low - span * 0.15, high + span * 0.15], row=1, col=1)
-    return figure
-
-
-def build_compare_figure(curves: dict[str, list[dict]], initial_capital: float) -> go.Figure:
-    figure = go.Figure()
-    for key, curve in curves.items():
-        frame = pd.DataFrame(curve)
-        if frame.empty:
-            continue
-        figure.add_trace(
-            go.Scatter(
-                x=pd.to_datetime(frame["t"], unit="ms"),
-                y=(frame["equity"] / initial_capital - 1.0) * 100,
-                mode="lines",
-                name=f"{STRATEGIES[key].icon} {STRATEGIES[key].label}",
-                line=dict(color=STRATEGY_COLORS.get(key, BLUE), width=2),
-                hovertemplate="%{y:.2f}%<extra></extra>",
-            )
-        )
-    figure.update_layout(
-        template="plotly_dark",
-        height=430,
-        margin=dict(l=8, r=10, t=40, b=6),
-        yaxis_title="累计收益率 %",
-        hovermode="x unified",
-        legend=dict(orientation="h", y=1.02, x=0),
-        uirevision="compare",
-    )
-    figure.update_yaxes(side="right", ticksuffix="%")
-    return figure
-
-
-def build_sentiment_gauge(score: float, label: str) -> go.Figure:
-    color = RED if score >= 75 else AMBER if score >= 55 else GREY if score >= 45 else GREEN
-    figure = go.Figure(
-        go.Indicator(
-            mode="gauge+number",
-            value=score,
-            number={"font": {"size": 40}, "suffix": ""},
-            title={"text": f"FOMO 情绪 · {label}", "font": {"size": 15}},
-            gauge={
-                "axis": {"range": [0, 100], "tickwidth": 1, "tickcolor": "#9e9e9e"},
-                "bar": {"color": color, "thickness": 0.28},
-                "bgcolor": "rgba(255,255,255,0.03)",
-                "borderwidth": 0,
-                "steps": [
-                    {"range": [0, 25], "color": "rgba(38,166,154,0.28)"},
-                    {"range": [25, 45], "color": "rgba(38,166,154,0.14)"},
-                    {"range": [45, 55], "color": "rgba(158,158,158,0.14)"},
-                    {"range": [55, 75], "color": "rgba(255,183,77,0.18)"},
-                    {"range": [75, 100], "color": "rgba(239,83,80,0.26)"},
-                ],
-                "threshold": {
-                    "line": {"color": "white", "width": 2},
-                    "thickness": 0.8,
-                    "value": score,
-                },
+    render_lwc_lines(
+        [
+            {"name": "净值", "color": BLUE, "points": equity_points, "pane": 0},
+            {
+                "name": "回撤 %",
+                "color": RED,
+                "points": drawdown_points,
+                "pane": 1,
+                "type": "area",
+                "fill": "rgba(239,83,80,0.25)",
+                "fill_bottom": "rgba(239,83,80,0.02)",
             },
-        )
+        ],
+        key=f"equity-{len(equity_points)}",
+        height=height,
     )
-    figure.update_layout(
-        template="plotly_dark",
-        height=280,
-        margin=dict(l=30, r=30, t=56, b=10),
-    )
-    return figure
+    st.caption("上图：策略净值；下图：回撤（%，填充区域）。")
 
 
-def build_sentiment_history(history: list[dict]) -> go.Figure:
-    frame = pd.DataFrame(history)
-    frame["time"] = pd.to_datetime(frame["t"], unit="ms")
-    figure = go.Figure(
-        go.Scatter(
-            x=frame["time"],
-            y=frame["value"],
-            mode="lines+markers",
-            name="恐惧贪婪指数",
-            line=dict(color=AMBER, width=2),
-            marker=dict(size=4),
-            hovertemplate="%{y:.0f}<extra></extra>",
-        )
+def render_compare_chart(curves: dict[str, list[dict]], initial_capital: float, height: int = 430) -> None:
+    """三策略同台：同一 pane 多条收益率曲线 + 图例（组件不渲染 legend，用胶囊代替）。"""
+    series: list[dict] = []
+    legend: list[tuple[str, str]] = []
+    for strategy_key, curve in curves.items():
+        if not curve:
+            continue
+        points = [
+            [int(item["t"]), (float(item["equity"]) / initial_capital - 1.0) * 100.0]
+            for item in curve
+        ]
+        spec = STRATEGIES.get(strategy_key)
+        label = f"{spec.icon} {spec.label}" if spec else strategy_key
+        color = STRATEGY_COLORS.get(strategy_key, BLUE)
+        series.append({"name": label, "color": color, "points": points, "pane": 0})
+        legend.append((color, label))
+    if not series:
+        return
+    total = max(len(item["points"]) for item in series)
+    render_lwc_lines(series, key=f"compare-{len(series)}-{total}", height=height)
+    st.markdown(
+        "".join(status_pill(label, color) for color, label in legend),
+        unsafe_allow_html=True,
     )
-    figure.add_hline(y=75, line=dict(color=RED, width=1, dash="dot"), annotation_text="贪婪 75")
-    figure.add_hline(y=25, line=dict(color=GREEN, width=1, dash="dot"), annotation_text="恐惧 25")
-    figure.update_layout(
-        template="plotly_dark",
-        height=260,
-        margin=dict(l=8, r=10, t=20, b=6),
-        yaxis=dict(range=[0, 100], title="指数"),
-        showlegend=False,
-        hovermode="x unified",
-        uirevision="sentiment-history",
+    st.caption("纵轴为累计收益率 %（相对初始资金），同一段行情、同一份资金。")
+
+
+def render_sentiment_chart(history: list[dict], height: int = 260) -> None:
+    """恐惧贪婪指数 30 天曲线 + 25/75 参考线。"""
+    points = [[int(item["t"]), float(item["value"])] for item in history if item.get("value") is not None]
+    if not points:
+        return
+    render_lwc_lines(
+        [{"name": "恐惧贪婪指数", "color": AMBER, "points": points, "pane": 0}],
+        key=f"fng-{len(points)}",
+        height=height,
+        reference_lines=[
+            {"price": 75, "color": RED, "title": "贪婪 75"},
+            {"price": 25, "color": GREEN, "title": "恐惧 25"},
+        ],
     )
-    return figure
+
+
+def render_fomo_gauge(score: float, label: str) -> None:
+    """FOMO 仪表盘（纯 HTML/CSS，不依赖 Plotly 的 go.Indicator）。"""
+    value = max(0.0, min(100.0, float(score)))
+    color = RED if value >= 75 else AMBER if value >= 55 else GREY if value >= 45 else GREEN
+    st.markdown(
+        f"""
+<div style="border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:18px 22px;">
+  <div style="font-size:.78rem;opacity:.68;letter-spacing:.05em;">FOMO 情绪 · {label}</div>
+  <div style="font-size:2.6rem;font-weight:600;line-height:1.15;color:{color};margin-top:2px;">
+    {value:.0f}<span style="font-size:1rem;opacity:.55;"> / 100</span>
+  </div>
+  <div style="position:relative;height:14px;border-radius:7px;margin:16px 0 0;
+              background:linear-gradient(90deg,#26a69a 0%,#26a69a 25%,#3f9e78 40%,
+              #9e9e9e 50%,#ffb74d 70%,#ef5350 100%);opacity:.5;"></div>
+  <div style="position:relative;">
+    <div style="position:absolute;left:{value:.1f}%;top:-19px;transform:translateX(-50%);
+                width:12px;height:12px;border-radius:50%;background:#fff;
+                box-shadow:0 0 0 3px rgba(255,255,255,.16);"></div>
+  </div>
+  <div style="display:flex;justify-content:space-between;font-size:.68rem;opacity:.5;margin-top:10px;">
+    <span>0 极度恐惧</span><span>45</span><span>55</span><span>75</span><span>100 极度贪婪</span>
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
 
 
 # ---------------------------------------------------------------- 回测结果
@@ -780,7 +724,7 @@ def render_backtest(result: dict, meta: dict, candles: list[dict]) -> None:
     render_trade_chart(candles, result, symbol, result["params"]["interval"], live_ctx["indicators"])
 
     st.markdown("##### 📈 净值与回撤")
-    plotly_chart(build_equity_figure(result["equity_curve"]))
+    render_equity_chart(result["equity_curve"])
 
     trades = result["trades"]
     with st.expander(f"📋 交易明细（{len(trades)} 笔）", expanded=False):
@@ -1851,7 +1795,7 @@ with tab_backtest:
         if compare.get("fingerprint") != compare_fp:
             st.warning("行情或资金参数已变化，下面的对比结果是旧数据。", icon="⚠️")
         show_table(pd.DataFrame(compare["rows"]))
-        plotly_chart(build_compare_figure(compare["curves"], compare["capital"]))
+        render_compare_chart(compare["curves"], compare["capital"])
 
     st.divider()
     st.caption(
@@ -1887,9 +1831,7 @@ with tab_mood:
 
             left, right = st.columns([1.15, 1])
             with left:
-                plotly_chart(
-                    build_sentiment_gauge(float(sentiment["score"]), str(sentiment["label"]))
-                )
+                render_fomo_gauge(float(sentiment["score"]), str(sentiment["label"]))
             with right:
                 components = sentiment.get("components") or {}
                 fear_greed = components.get("fear_greed")
@@ -1912,7 +1854,7 @@ with tab_mood:
             history = sentiment.get("history") or []
             if history:
                 st.markdown("##### 😱 恐惧贪婪指数 · 近 30 天")
-                plotly_chart(build_sentiment_history(history))
+                render_sentiment_chart(history)
 
             st.divider()
             st.markdown("##### 📰 主要新闻")
