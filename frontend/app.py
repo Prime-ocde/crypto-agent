@@ -1129,9 +1129,10 @@ with header_right:
 
 
 INDICATOR_COLORS = ["#4fc3f7", "#ffb74d", "#26a69a", "#ef5350", "#9e9e9e", "#ba68c8"]
-# 这版图表组件没有增量更新，只能靠 forceReinit 重建；默认 2 秒与轮询同频，
-# 这样图上的「最新」价格与顶部芯片最多差一个轮询周期（想保住缩放就把这个值调大）
-CHART_REFRESH_S = float(os.getenv("CHART_REFRESH_SECONDS", "2"))
+# 这版图表组件没有增量更新，只能靠 forceReinit 整图重建。
+# 实测 2 秒重建太激进：重建撞上首次挂载时会出现"图表空白且不恢复"，5 秒稳定。
+# 与顶部实时价的差由标签上的「@ 重绘时刻」说明；想更快可调小这个值，代价是更容易闪空。
+CHART_REFRESH_S = float(os.getenv("CHART_REFRESH_SECONDS", "5"))
 
 
 def _chart_should_reinit(scope: str, signature: tuple, min_interval: float | None = None) -> bool:
