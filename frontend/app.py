@@ -1315,13 +1315,13 @@ def render_live_body(ctx: dict) -> None:
         ctx["indicators"].get("kdj_period"),
     )
     force_reinit = _chart_should_reinit(f"live-{ctx['symbol']}-{ctx['interval']}", signature)
-    # 图上「最新」标签带数据时刻：组件只能整图重建，标签天然落后于顶部实时价，
-    # 写明 "最新 @ 15:02:11" 一眼就能看出这是哪一刻的价格，而不是以为算错了。
-    price_title = (
-        f"最新 @ {datetime.fromtimestamp(last['t'] / 1000).strftime('%H:%M:%S')}"
-        if interval_ms(ctx["interval"]) >= 60_000
-        else "最新"
-    )
+    # 图上「最新」标签带**重绘时刻**：这版组件只能整图重建，标签天然落后于顶部实时价。
+    # 写明 "最新 80365.00 @ 09:05:12"（上次重绘的那一刻 + 那一刻的价格），
+    # 两个数字对不上时一眼能看出是刷新节奏，而不是以为算错了。
+    asof_key = f"_chart_asof_{ctx['symbol']}_{ctx['interval']}"
+    if force_reinit or asof_key not in st.session_state:
+        st.session_state[asof_key] = datetime.now().strftime("%H:%M:%S")
+    price_title = f"最新 {float(last['c']):,.2f} @ {st.session_state[asof_key]}"
 
     if not render_lwc_candles(
         candles=candles,
