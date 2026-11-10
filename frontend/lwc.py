@@ -29,7 +29,9 @@ def build_payload(
     height: int = 520,
     overlays: Iterable[dict] | None = None,
     price_line: dict | None = None,
+    price_lines: Iterable[dict] | None = None,
     markers: Iterable[dict] | None = None,
+    panes: Iterable[dict] | None = None,
     reset_view: bool = False,
 ) -> dict:
     """把内部 K 线/指标/成交记录翻译成组件要的 JSON。"""
@@ -92,6 +94,47 @@ def build_payload(
             }
         )
 
+    # 指标副图：内部 pane 编号从 2 开始（0=K线、1=成交量），组件里成交量是叠加在 pane 0 的，
+    # 所以指标从 pane 1 起排。
+    pane_payload: list[dict] = []
+    for pane in panes or []:
+        index = max(1, int(pane.get("pane", 2)) - 1)
+        entry: dict[str, Any] = {"index": index, "lines": []}
+        hist = pane.get("hist")
+        if hist:
+            points = []
+            for point in hist.get("points") or []:
+                ts = _chart_time(point[0])
+                value = _finite(point[1])
+                if ts is None or value is None:
+                    continue
+                points.append({"time": ts, "value": value, "color": point[2] if len(point) > 2 else None})
+            colors = list(hist.get("colors") or [])
+            for i, point in enumerate(points):
+                if not point.get("color") and i < len(colors):
+                    point["color"] = colors[i]
+            if points:
+                entry["hist"] = {"points": points}
+        for line in pane.get("lines") or []:
+            points = []
+            for point in line.get("points") or []:
+                ts = _chart_time(point[0])
+                value = _finite(point[1])
+                if ts is None or value is None:
+                    continue
+                points.append({"time": ts, "value": value})
+            if points:
+                entry["lines"].append(
+                    {
+                        "key": line.get("name", ""),
+                        "color": line.get("color", "#ffb74d"),
+                        "width": int(line.get("width", 1)),
+                        "points": points,
+                    }
+                )
+        if entry.get("hist") or entry["lines"]:
+            pane_payload.append(entry)
+
     payload: dict[str, Any] = {
         "height": int(height),
         "resetView": bool(reset_view),
@@ -99,6 +142,7 @@ def build_payload(
         "volume": volume_points,
         "overlays": overlay_payload,
         "markers": marker_payload,
+        "panes": pane_payload,
     }
     if price_line:
         payload["priceLine"] = {
@@ -106,6 +150,23 @@ def build_payload(
             "color": price_line.get("color", "#ffb74d"),
             "title": price_line.get("title", "最新"),
         }
+    extra_lines = []
+    for spec in price_lines or []:
+        try:
+            price = float(spec.get("price") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if price <= 0:
+            continue
+        extra_lines.append(
+            {
+                "price": price,
+                "color": spec.get("color", "rgba(79,195,247,0.45)"),
+                "title": spec.get("title", ""),
+            }
+        )
+    if extra_lines:
+        payload["priceLines"] = extra_lines
     return payload
 
 
