@@ -157,6 +157,18 @@ def test_backtest_uses_selected_interval(monkeypatch) -> None:
     assert any("周期：1 周" in caption for caption in captions), captions[:4]
 
 
+def test_test_connection_button_works_in_direct_mode() -> None:
+    """直连模式下点「测试行情源」不能抛异常（曾经无条件请求空地址 → MissingSchema）。"""
+    app = AppTest.from_file(str(APP_PATH), default_timeout=120)
+    app.run()
+
+    button = next(btn for btn in app.button if "测试" in btn.label)
+    assert "行情源" in button.label, "未配置后端时按钮应提示测试行情源"
+    button.click().run()
+
+    assert not app.exception, f"测试按钮抛异常：{app.exception}"
+
+
 def test_offline_mode_renders_candles_even_when_cache_is_stale() -> None:
     """降级到离线时图表必须有数据：1m 缓存过期曾导致页面只剩一根都画不出来。"""
     app = AppTest.from_file(str(APP_PATH), default_timeout=90)
