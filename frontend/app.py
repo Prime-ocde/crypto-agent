@@ -44,7 +44,6 @@ from frontend.charts import render_candles as render_lwc_candles  # noqa: E402
 from frontend.charts import render_lines as render_lwc_lines  # noqa: E402
 
 DATA_DIR = ROOT / "data"
-DEFAULT_BACKEND = "http://127.0.0.1:8000"
 DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"]
 # 后端不可达时的周期兜底：必须覆盖 README 承诺的周期，否则 DEFAULT_INTERVAL=1w 会被静默丢弃
 DEFAULT_INTERVALS = ["1m", "5m", "1h", "1d", "1w", "1M", "1y"]
@@ -319,7 +318,9 @@ def resolve_data(base_url: str, symbol: str, interval: str, limit: int, offline:
         return fallback
 
     if offline:
-        note = "已手动开启离线模式（Mock），不访问后端"
+        note = "已手动开启离线模式（Mock），不访问任何网络"
+    elif not base_url:
+        note = "直连模式：未配置后端，行情直接取 Binance 公共接口"
     elif backend_down:
         note = "后端暂不可达，使用直连行情（60 秒后重试后端）"
     else:
@@ -358,7 +359,7 @@ def resolve_data(base_url: str, symbol: str, interval: str, limit: int, offline:
                     "age_s": 0.0,
                     "source": "🟢 Binance 直连",
                     "ui_source": "🟢 Binance 直连",
-                    "ui_note": f"{note}；直连模式只提供行情（情绪/新闻需后端）",
+                    "ui_note": f"{note}；资金费率/多空比需要后端，直连模式下显示默认值",
                 }
             )
         if st.session_state.get("_direct_down_until", 0.0) > now:
@@ -815,20 +816,28 @@ with st.sidebar:
     st.markdown("### ⚙️ 参数配置")
     st.caption("所有改动即时生效；改动参数后请重新运行回测。")
 
-    backend_default = st.session_state.get("backend_url", get_setting("BACKEND_BASE_URL", DEFAULT_BACKEND))
+    backend_default = st.session_state.get(
+        "backend_url", get_setting("BACKEND_BASE_URL", "")
+    )
     backend_url = (
         st.text_input(
             "后端地址",
             value=backend_default,
             key="backend_input",
-            help="云端部署时填 https:// 公网地址；本地默认 127.0.0.1:8000",
+            placeholder="留空 = 直连模式（不依赖后端）",
+            help=(
+                "留空：前端直连 Binance 公共接口，K 线/回测/手动交易全部可用；"
+                "填 http(s):// 地址：走后端（本地 127.0.0.1:8000，云端填公网地址）"
+            ),
         )
         .strip()
         .rstrip("/")
     )
     st.session_state["backend_url"] = backend_url
+    if not backend_url:
+        st.caption("🛰️ 直连模式：未配置后端，行情直接取 Binance 公共接口。")
 
-    config = fetch_config(backend_url)
+    config = fetch_config(backend_url) if backend_url else {}
     symbols = config.get("symbols") or DEFAULT_SYMBOLS
     intervals = config.get("intervals") or DEFAULT_INTERVALS
     default_symbol = config.get("default_symbol") or symbols[0]
@@ -1339,9 +1348,14 @@ def render_live_body(ctx: dict) -> None:
     ):
         st.warning("当前没有可渲染的 K 线数据。", icon="📉")
 
-    with st.expander("🩺 后端连接详情（/api/health）", expanded=False):
+    with st.expander("🩺 数据源详情", expanded=False):
         if ctx["offline"]:
-            st.caption("离线模式，未请求后端。")
+            st.caption("离线模式：不访问任何网络，行情为本地合成。")
+        elif not ctx["base_url"]:
+            st.caption(
+                "直连模式：未配置后端。行情由 Streamlit 服务端直接请求 "
+                "`data-api.binance.vision`，因此资金费率/多空比不可用，其余功能正常。"
+            )
         elif st.session_state.get("_backend_down_until", 0.0) > time.time():
             st.caption("后端暂不可达，已切换 Binance 直连行情（60 秒后重试后端）。")
         else:
@@ -1815,11 +1829,11 @@ with tab_mood:
     if offline:
         st.info("离线模式不访问后端：情绪与新闻需要在线数据源。", icon="🛰️")
     else:
-        sentiment = fetch_sentiment(backend_url, symbol)
+        sentiment = fetch_sentiment(backend_url, symbol) if backend_url else None
         if not sentiment:
             sentiment = fetch_direct_sentiment(symbol)
-            if sentiment:
-                st.caption("直连模式：后端未部署，情绪数据由前端进程直接获取。")
+            if sentiment and backend_url:
+                st.caption("后端情绪接口不可用，已改为前端进程直接获取。")
         if not sentiment:
             st.warning("后端与直连数据源都不可达，情绪暂不可用（行情与回测不受影响）。", icon="📡")
         else:
@@ -1859,7 +1873,7 @@ with tab_mood:
 
             st.divider()
             st.markdown("##### 📰 主要新闻")
-            news = fetch_news(backend_url)
+            news = fetch_news(backend_url) if backend_url else None
             if not news or not news.get("items"):
                 news = fetch_direct_news()
             if not news or not news.get("items"):
