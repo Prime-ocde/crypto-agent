@@ -56,7 +56,7 @@ async def capture(url: str, out: Path, wait_s: float = 12.0, js: str = "", out2:
         if not target:
             raise RuntimeError("CDP 未就绪")
 
-        async with websockets.connect(target, max_size=80 * 1024 * 1024) as ws:
+        async with websockets.connect(target, max_size=80 * 1024 * 1024, ping_interval=None) as ws:
             await ws.send(json.dumps({"id": 1, "method": "Page.enable"}))
             ua = os.getenv("SHOT_UA")
             if ua:
@@ -72,6 +72,40 @@ async def capture(url: str, out: Path, wait_s: float = 12.0, js: str = "", out2:
                 )
             await ws.send(json.dumps({"id": 2, "method": "Page.navigate", "params": {"url": url}}))
             await asyncio.sleep(wait_s)
+
+            async def call(call_id: int, method: str, params: dict | None = None) -> dict:
+                payload: dict = {"id": call_id, "method": method}
+                if params is not None:
+                    payload["params"] = params
+                await ws.send(json.dumps(payload))
+                while True:
+                    message = json.loads(await ws.recv())
+                    if message.get("id") == call_id:
+                        return message
+
+            click_text = os.getenv("SHOT_CLICK_TEXT")
+            if click_text:
+                expr = (
+                    "(() => { const el=[...document.querySelectorAll('button,a,[role=button],[role=tab]')]"
+                    f".find(x=>(x.innerText||'').includes({json.dumps(click_text)}));"
+                    " if(!el) return null; const r=el.getBoundingClientRect();"
+                    " return [r.left + r.width/2, r.top + r.height/2]; })()"
+                )
+                res = await call(20, "Runtime.evaluate", {"expression": expr, "returnByValue": True})
+                coords = (res.get("result") or {}).get("result", {}).get("value")
+                if coords:
+                    x, y = float(coords[0]), float(coords[1])
+                    for kind in ("mousePressed", "mouseReleased"):
+                        await call(
+                            21,
+                            "Input.dispatchMouseEvent",
+                            {"type": kind, "x": x, "y": y, "button": "left", "clickCount": 1},
+                        )
+                    print(f"(已点击「{click_text}」@{x:.0f},{y:.0f})", flush=True)
+                else:
+                    print(f"(页面里找不到「{click_text}」)", flush=True)
+                await asyncio.sleep(post_js_wait)
+
             if js:
                 await ws.send(
                     json.dumps(
