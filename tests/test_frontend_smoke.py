@@ -181,9 +181,14 @@ def test_offline_mode_renders_candles_even_when_cache_is_stale() -> None:
     components = app.get("component_instance")
     assert components, "离线模式没有渲染任何图表组件"
     config = json.loads(components[0].proto.json_args)["config"]
-    series = (config.get("charts") or [{}])[0].get("series") or []
-    assert series, "图表组件没有 series"
-    assert len(series[0].get("data") or []) > 0, "离线降级后 K 线数据为空"
+    # 实时图已切到自建组件（payload 里直接是 candles）；旧组件则是 charts[0].series
+    candles = config.get("candles") or []
+    if candles:
+        assert len(candles) > 0, "离线降级后 K 线数据为空"
+    else:
+        series = (config.get("charts") or [{}])[0].get("series") or []
+        assert series, "图表组件没有 series"
+        assert len(series[0].get("data") or []) > 0, "离线降级后 K 线数据为空"
 
 
 def test_manual_tab_opens_and_closes_position(tmp_path, monkeypatch) -> None:
