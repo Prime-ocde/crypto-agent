@@ -40,8 +40,7 @@ from core.strategy_registry import STRATEGIES, STRATEGY_KEYS  # noqa: E402
 from core.strategy_registry import run_backtest as run_strategy_backtest  # noqa: E402
 from core.synthetic import default_base_price, synthesize_candles  # noqa: E402
 from core.timeframe import interval_label, interval_ms  # noqa: E402
-from frontend.charts import render_candles as render_lwc_candles  # noqa: E402
-from frontend.charts import render_lines as render_lwc_lines  # noqa: E402
+from frontend.lwc import build_lines_payload as lwc_lines  # noqa: E402
 from frontend.lwc import build_payload as lwc_payload  # noqa: E402
 from frontend.lwc import render as lwc_render  # noqa: E402
 
@@ -553,20 +552,23 @@ def render_equity_chart(equity_curve: list[dict], height: int = 420) -> None:
         equity_points.append([int(item["t"]), equity])
         drawdown_points.append([int(item["t"]), (equity / peak - 1.0) * 100.0 if peak else 0.0])
 
-    render_lwc_lines(
-        [
-            {"name": "净值", "color": BLUE, "points": equity_points, "pane": 0},
-            {
-                "name": "回撤 %",
-                "color": RED,
-                "points": drawdown_points,
-                "pane": 1,
-                "type": "area",
-                "fill": "rgba(239,83,80,0.25)",
-                "fill_bottom": "rgba(239,83,80,0.02)",
-            },
-        ],
-        key=f"equity-{len(equity_points)}",
+    lwc_render(
+        lwc_lines(
+            [
+                {"name": "净值", "color": BLUE, "points": equity_points, "pane": 0},
+                {
+                    "name": "回撤 %",
+                    "color": RED,
+                    "points": drawdown_points,
+                    "pane": 1,
+                    "type": "area",
+                    "fill": "rgba(239,83,80,0.25)",
+                    "fill_bottom": "rgba(239,83,80,0.02)",
+                },
+            ],
+            height=height,
+        ),
+        key="lwc-equity",
         height=height,
     )
     st.caption("上图：策略净值；下图：回撤（%，填充区域）。")
@@ -591,7 +593,7 @@ def render_compare_chart(curves: dict[str, list[dict]], initial_capital: float, 
     if not series:
         return
     total = max(len(item["points"]) for item in series)
-    render_lwc_lines(series, key=f"compare-{len(series)}-{total}", height=height)
+    lwc_render(lwc_lines(series, height=height), key="lwc-compare", height=height)
     st.markdown(
         "".join(status_pill(label, color) for color, label in legend),
         unsafe_allow_html=True,
@@ -604,14 +606,17 @@ def render_sentiment_chart(history: list[dict], height: int = 260) -> None:
     points = [[int(item["t"]), float(item["value"])] for item in history if item.get("value") is not None]
     if not points:
         return
-    render_lwc_lines(
-        [{"name": "恐惧贪婪指数", "color": AMBER, "points": points, "pane": 0}],
-        key=f"fng-{len(points)}",
+    lwc_render(
+        lwc_lines(
+            [{"name": "恐惧贪婪指数", "color": AMBER, "points": points, "pane": 0}],
+            height=height,
+            reference_lines=[
+                {"price": 75, "color": RED, "title": "贪婪 75"},
+                {"price": 25, "color": GREEN, "title": "恐惧 25"},
+            ],
+        ),
+        key="lwc-fng",
         height=height,
-        reference_lines=[
-            {"price": 75, "color": RED, "title": "贪婪 75"},
-            {"price": 25, "color": GREEN, "title": "恐惧 25"},
-        ],
     )
 
 
@@ -1660,33 +1665,25 @@ def render_manual_body(ctx: dict) -> None:
             {"price": snapshot["avg_entry"], "color": BLUE, "title": "开仓均价", "width": 1}
         )
 
-    # 两档重建策略：
-    #  1) 持仓/成交变化 → 立即重建（不节流），保证成交点与强平线马上出现；
-    #  2) 价格变化 → 按 CHART_REFRESH_S 节流重建，否则图表会冻在打开那一刻（旧 bug）。
-    account_signature = (
-        len(account.records),
-        snapshot["position"],
-        round(float(snapshot["liq_price"] or 0.0), 2),
-    )
-    force_on_trade = _chart_should_reinit(
-        f"manual-account-{ctx['symbol']}-{ctx['interval']}", account_signature, min_interval=0.0
-    )
-    force_on_price = _chart_should_reinit(
-        f"manual-price-{ctx['symbol']}-{ctx['interval']}",
-        (round(price, 2), int(candles[-1]["t"]) if candles else 0),
-    )
-    render_lwc_candles(
-        candles=candles,
-        levels=[],
-        lines=[],
-        markers=account.records[-40:],
-        interval=ctx["interval"],
-        height=430,
-        key=f"manual-{ctx['symbol']}-{ctx['interval']}",
-        price_lines=price_lines,
-        price_title=f"最新 {price:,.2f}",
-        force_reinit=force_on_trade or force_on_price,
-    )
+    # 自建组件是增量更新：开平仓/强平只影响 markers 与价格线，价格变化只 update 最后一根，
+    # 视口不会被重置（不需要再区分「账户变化」和「价格变化」两档节流）。
+    if candles:
+        lwc_render(
+            lwc_payload(
+                candles,
+                height=430,
+                markers=account.records[-40:],
+                price_line={"price": price, "title": f"最新 {price:,.2f}"},
+                price_lines=price_lines,
+                reset_view=_chart_should_reinit(
+                    f"lwc-manual-{ctx['symbol']}-{ctx['interval']}",
+                    (ctx["symbol"], ctx["interval"], len(candles)),
+                    min_interval=0.0,
+                ),
+            ),
+            key=f"lwc-manual-{ctx['symbol']}-{ctx['interval']}",
+            height=430,
+        )
 
     st.markdown("##### 🧾 成交与爆仓记录")
     frame = _manual_records_frame(account.records)
