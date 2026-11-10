@@ -106,6 +106,29 @@ async def capture(url: str, out: Path, wait_s: float = 12.0, js: str = "", out2:
                     print(f"(页面里找不到「{click_text}」)", flush=True)
                 await asyncio.sleep(post_js_wait)
 
+            hover = os.getenv("SHOT_HOVER")
+            if hover:
+                hx, hy = (float(v) for v in hover.split(","))
+                for dx in (0, 6, 12):
+                    await call(
+                        31,
+                        "Input.dispatchMouseEvent",
+                        {"type": "mouseMoved", "x": hx + dx, "y": hy, "button": "none"},
+                    )
+                    await asyncio.sleep(0.15)
+                print(f"(鼠标移到 {hx:.0f},{hy:.0f} 触发悬浮)", flush=True)
+                await asyncio.sleep(1.2)
+
+            eval_expr = os.getenv("SHOT_EVAL")
+            if eval_expr:
+                res = await call(
+                    41,
+                    "Runtime.evaluate",
+                    {"expression": eval_expr, "returnByValue": True, "awaitPromise": True},
+                )
+                value = (res.get("result") or {}).get("result", {})
+                print("EVAL:", json.dumps(value.get("value"), ensure_ascii=False, default=str)[:600], flush=True)
+
             if js:
                 await ws.send(
                     json.dumps(

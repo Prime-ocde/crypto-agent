@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>Lightweight Charts</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; background: #ffffff; overflow: hidden;
+                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    #chart { width: 100%; height: 100%; }
+    #tip {
+      position: absolute; pointer-events: none; z-index: 10; display: none;
+      background: rgba(19, 23, 34, 0.94); color: #f5f7fa; border: 1px solid rgba(255,255,255,.14);
+      border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.55;
+      box-shadow: 0 6px 20px rgba(0,0,0,.25); white-space: nowrap;
+    }
+    #tip .row { display: flex; justify-content: space-between; gap: 14px; }
+    #tip .k { opacity: .65; }
+    #tip .up { color: #26a69a; } #tip .down { color: #ef5350; }
+  </style>
+</head>
+<body>
+  <div id="chart"></div>
+  <div id="tip"></div>
+  <script src="lightweight-charts.standalone.production.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
