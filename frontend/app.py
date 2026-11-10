@@ -1603,10 +1603,20 @@ def render_manual_body(ctx: dict) -> None:
             {"price": snapshot["avg_entry"], "color": BLUE, "title": "开仓均价", "width": 1}
         )
 
-    manual_signature = (
+    # 两档重建策略：
+    #  1) 持仓/成交变化 → 立即重建（不节流），保证成交点与强平线马上出现；
+    #  2) 价格变化 → 按 CHART_REFRESH_S 节流重建，否则图表会冻在打开那一刻（旧 bug）。
+    account_signature = (
         len(account.records),
         snapshot["position"],
         round(float(snapshot["liq_price"] or 0.0), 2),
+    )
+    force_on_trade = _chart_should_reinit(
+        f"manual-account-{ctx['symbol']}-{ctx['interval']}", account_signature, min_interval=0.0
+    )
+    force_on_price = _chart_should_reinit(
+        f"manual-price-{ctx['symbol']}-{ctx['interval']}",
+        (round(price, 2), int(candles[-1]["t"]) if candles else 0),
     )
     render_lwc_candles(
         candles=candles,
@@ -1617,10 +1627,8 @@ def render_manual_body(ctx: dict) -> None:
         height=430,
         key=f"manual-{ctx['symbol']}-{ctx['interval']}",
         price_lines=price_lines,
-        # 手动交易是"点了才变"，不节流：开平仓后立刻重画，才能马上看到成交点和强平线
-        force_reinit=_chart_should_reinit(
-            f"manual-{ctx['symbol']}-{ctx['interval']}", manual_signature, min_interval=0.0
-        ),
+        price_title=f"最新 {price:,.2f}",
+        force_reinit=force_on_trade or force_on_price,
     )
 
     st.markdown("##### 🧾 成交与爆仓记录")
