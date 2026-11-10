@@ -1107,12 +1107,27 @@ with st.sidebar:
             )
 
     action_left, action_right = st.columns(2)
-    if action_left.button("🔌 测试连接", width="stretch"):
-        try:
-            health = requests.get(f"{backend_url}/api/health", timeout=3).json()
-            st.toast(f"连接正常 · {health.get('mode')} / {health.get('status')}", icon="✅")
-        except Exception as exc:  # noqa: BLE001
-            st.toast(f"连接失败：{type(exc).__name__}", icon="🚨")
+    test_label = "🔌 测试行情源" if not backend_url else "🔌 测试后端"
+    if action_left.button(test_label, width="stretch"):
+        if not backend_url:
+            # 直连模式：没有后端可测，改为直接探一次 Binance 公共接口（不走缓存，测真实延迟）
+            started = time.time()
+            rows = fetch_direct_klines_raw(symbol, interval, 5)
+            elapsed_ms = (time.time() - started) * 1000
+            if rows:
+                st.toast(
+                    f"直连正常 · {len(rows)} 根 · {elapsed_ms:.0f} ms · "
+                    f"最新 {rows[-1]['c']:,.2f}",
+                    icon="✅",
+                )
+            else:
+                st.toast("直连不可达：Binance 公共接口无响应", icon="🚨")
+        else:
+            try:
+                health = requests.get(f"{backend_url}/api/health", timeout=3).json()
+                st.toast(f"后端正常 · {health.get('mode')} / {health.get('status')}", icon="✅")
+            except Exception as exc:  # noqa: BLE001
+                st.toast(f"后端连接失败：{type(exc).__name__}", icon="🚨")
 
     if action_right.button("♻️ 刷新缓存", width="stretch"):
         st.cache_data.clear()
