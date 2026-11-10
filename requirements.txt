@@ -10,10 +10,8 @@ numpy>=1.26.0
 # ===== 前端 / 可视化 =====
 # st.fragment(run_every=...) 需要 1.37+；width="stretch" 需要 1.49+
 streamlit>=1.49.0
-# 阶段二：K 线改用 TradingView Lightweight Charts（0.3.0 起 API 变为 Chart/Series 类）
-streamlit-lightweight-charts-pro>=0.3.0,<0.4
-# 锁死底层实现：0.3.0 的 series/options 结构按这个版本调过，云端构建必须可复现
-lightweight-charts-pro==0.1.0
+# K 线用自建组件：官方 lightweight-charts JS 已 vendor 到 frontend/lwc_component/，
+# 不再依赖第三方 Streamlit 封装（那版只能整图重建，缩放会丢）
 requests>=2.32.0
 
 # ===== 配置与工具 =====
