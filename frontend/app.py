@@ -1273,6 +1273,53 @@ def _indicator_specs(candles: list[dict], cfg: dict) -> tuple[list[dict], list[d
     return overlays, panes
 
 
+def render_candle_inspector(candles: list[dict], symbol: str, interval: str) -> None:
+    """单根 K 线详情。
+
+    这版 Lightweight Charts 组件的 tooltip 只用于成交矩形，没有 OHLC 悬浮框
+    （源码里 createTooltipContent 写死 entryPrice/exitPrice/pnl），所以这里用
+    Streamlit 原生控件补一个可查单根的平台：选一根，看开高低收/涨跌幅/振幅/成交量。
+    """
+    if not candles:
+        return
+    recent = list(candles[-120:])[::-1]  # 最近的在前
+    with st.expander("🔍 单根 K 线详情", expanded=False):
+        def _label(index: int) -> str:
+            row = recent[index]
+            stamp = datetime.fromtimestamp(row["t"] / 1000).strftime("%m-%d %H:%M")
+            return f"{stamp}　收 {row['c']:,.2f}"
+
+        picked = st.selectbox(
+            "选择一根 K 线（最近的在前）",
+            range(len(recent)),
+            format_func=_label,
+            key=f"candle-pick-{symbol}-{interval}",
+        )
+        row = recent[picked]
+        open_, high, low, close, volume = (
+            float(row["o"]),
+            float(row["h"]),
+            float(row["l"]),
+            float(row["c"]),
+            float(row.get("v") or 0.0),
+        )
+        change = (close / open_ - 1.0) * 100.0 if open_ else 0.0
+        amplitude = (high - low) / open_ * 100.0 if open_ else 0.0
+        stamp = datetime.fromtimestamp(row["t"] / 1000)
+
+        cols = st.columns(4)
+        cols[0].metric("开盘", f"{open_:,.2f}")
+        cols[1].metric("最高", f"{high:,.2f}")
+        cols[2].metric("最低", f"{low:,.2f}")
+        cols[3].metric("收盘", f"{close:,.2f}", f"{change:+.2f}%")
+
+        st.caption(
+            f"时间 {stamp:%Y-%m-%d %H:%M:%S}　·　振幅 {amplitude:.2f}%　·　"
+            f"成交量 {volume:,.4f}　·　周期 {interval_label(interval)}"
+            + ("　·　未收盘（正在形成）" if picked == 0 else "")
+        )
+
+
 def render_live_body(ctx: dict) -> None:
     payload = resolve_data(
         ctx["base_url"], ctx["symbol"], ctx["interval"], ctx["limit"], ctx["offline"]
@@ -1362,6 +1409,8 @@ def render_live_body(ctx: dict) -> None:
         price_title=price_title,
     ):
         st.warning("当前没有可渲染的 K 线数据。", icon="📉")
+    else:
+        render_candle_inspector(candles, ctx["symbol"], ctx["interval"])
 
     with st.expander("🩺 数据源详情", expanded=False):
         if ctx["offline"]:
