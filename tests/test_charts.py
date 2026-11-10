@@ -61,10 +61,13 @@ def test_clean_rows_clamps_broken_high_low() -> None:
 
 
 def test_candles_and_volume_are_built_in_seconds() -> None:
+    from frontend.charts import _TZ_OFFSET_S
+
     rows = clean_rows([candle(), candle(offset=60_000, c=99.0)])
     candles = to_candles(rows)
     volumes = to_volume(rows)
-    assert candles[0].time == MS // 1000
+    # 时间戳会平移到本地墙上时间（LWC 按 UTC 渲染，不平移会慢一个时区）
+    assert candles[0].time == MS // 1000 + _TZ_OFFSET_S
     assert candles[0].open == 100.0
     assert volumes[0].color.startswith("rgba(38,166,154")
     assert volumes[1].color.startswith("rgba(239,83,80")

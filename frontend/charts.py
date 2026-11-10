@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import math
+import time
 from typing import Any, Iterable, Sequence
 
 from lightweight_charts_pro.charts.options import LineOptions, PriceLineOptions
@@ -95,6 +96,25 @@ def _seconds(ms: Any) -> int | None:
     return value // 1000 if value > 10_000_000_000 else value
 
 
+# Lightweight Charts 的时间轴**按 UTC 渲染**，不会跟随浏览器时区。
+# 不做处理时，东八区用户会看到轴上的时间比本地慢 8 小时，很像"行情延迟了几小时"。
+# 这里把所有时间戳平移到本地墙上时间（wall-clock），轴上的刻度就和手机/电脑时间一致。
+def _local_offset_seconds() -> int:
+    try:
+        return int(time.localtime().tm_gmtoff)
+    except (AttributeError, OSError):  # pragma: no cover - 极端平台兜底
+        return 0
+
+
+_TZ_OFFSET_S = _local_offset_seconds()
+
+
+def _chart_time(ms: Any) -> int | None:
+    """毫秒时间戳 → 本地墙上时间的 UNIX 秒（给 Lightweight Charts 用）。"""
+    seconds = _seconds(ms)
+    return None if seconds is None else seconds + _TZ_OFFSET_S
+
+
 def _finite(value: Any) -> float | None:
     try:
         number = float(value)
@@ -129,7 +149,7 @@ def clean_rows(candles: Iterable[dict] | None) -> list[dict]:
 def to_candles(rows: Sequence[dict]) -> list[CandlestickData]:
     return [
         CandlestickData(
-            time=row["t"],
+            time=_chart_time(row["t"]),
             open=row["o"],
             high=row["h"],
             low=row["l"],
@@ -143,7 +163,7 @@ def to_volume(rows: Sequence[dict]) -> list[HistogramData]:
     """成交量按当根涨跌染色（LWC 的 histogram 支持逐点 color）。"""
     return [
         HistogramData(
-            time=row["t"],
+            time=_chart_time(row["t"]),
             value=row["v"],
             color="rgba(38,166,154,0.40)" if row["c"] >= row["o"] else "rgba(239,83,80,0.40)",
         )
@@ -156,7 +176,7 @@ def to_line(points: Iterable[Sequence[float]]) -> list[LineData]:
     out: list[LineData] = []
     for point in points or []:
         try:
-            ts = _seconds(point[0])
+            ts = _chart_time(point[0])
             value = _finite(point[1])
         except (TypeError, IndexError):
             continue
@@ -174,7 +194,7 @@ def to_markers(records: Iterable[dict] | None) -> list[Marker]:
     """
     markers: list[Marker] = []
     for record in records or []:
-        ts = _seconds(record.get("t"))
+        ts = _chart_time(record.get("t"))
         price = _finite(record.get("price"))
         if ts is None or price is None:
             continue
