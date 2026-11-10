@@ -42,6 +42,8 @@ from core.synthetic import default_base_price, synthesize_candles  # noqa: E402
 from core.timeframe import interval_label, interval_ms  # noqa: E402
 from frontend.charts import render_candles as render_lwc_candles  # noqa: E402
 from frontend.charts import render_lines as render_lwc_lines  # noqa: E402
+from frontend.lwc import build_payload as lwc_payload  # noqa: E402
+from frontend.lwc import render as lwc_render  # noqa: E402
 
 DATA_DIR = ROOT / "data"
 DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"]
@@ -512,20 +514,29 @@ def render_trade_chart(
         tuple(sorted((indicators or {}).get("selected") or [])),
         tuple((indicators or {}).get("ma_periods") or []),
     )
-    render_lwc_candles(
-        candles=candles,
-        levels=levels,
-        lines=lines,
-        markers=trades,
-        interval=interval,
-        height=470 + 110 * len(panes),
-        key=f"trade-{symbol}-{interval}",
-        overlay_lines=overlay_lines,
-        sub_panes=panes,
-        # 回测结果不变时不重建（保住缩放）；重跑回测后立即重画成交点和指标
-        force_reinit=_chart_should_reinit(
-            f"trade-{symbol}-{interval}", signature, min_interval=0.0
+    # 回测图叠加：指标（MA/BOLL）+ 策略自带的均线/参考线
+    merged_overlays = list(overlay_lines) + [
+        {"name": line.get("name", ""), "color": line.get("color", BLUE), "points": line.get("points") or []}
+        for line in lines
+    ]
+    height = 470 + 110 * len(panes)
+    lwc_render(
+        lwc_payload(
+            candles,
+            height=height,
+            overlays=merged_overlays,
+            panes=panes,
+            markers=trades,
+            price_lines=[
+                {"price": float(level), "color": "rgba(79,195,247,0.45)", "title": ""}
+                for level in (levels or [])[:12]
+            ],
+            reset_view=_chart_should_reinit(
+                f"trade-{symbol}-{interval}", signature, min_interval=0.0
+            ),
         ),
+        key=f"lwc-trade-{symbol}-{interval}",
+        height=height,
     )
 
 
@@ -1373,12 +1384,12 @@ def render_live_body(ctx: dict) -> None:
     overlays, panes = _indicator_specs(candles, ctx["indicators"])
     height = 520 + 110 * len(panes)
     last = candles[-1]
+    # 「结构签名」刻意**不含价格**：价格变化绝不能触发重新 fitContent，
+    # 否则用户缩放又会被重置（自建组件的意义就在于此）。
     signature = (
         ctx["symbol"],
         ctx["interval"],
         len(candles),
-        int(last["t"]),
-        round(float(last["c"]), 2),
         tuple(sorted(ctx["indicators"].get("selected") or [])),
         tuple(ctx["indicators"].get("ma_periods") or []),
         ctx["indicators"].get("boll_period"),
@@ -1386,31 +1397,28 @@ def render_live_body(ctx: dict) -> None:
         ctx["indicators"].get("rsi_period"),
         ctx["indicators"].get("kdj_period"),
     )
-    force_reinit = _chart_should_reinit(f"live-{ctx['symbol']}-{ctx['interval']}", signature)
-    # 图上「最新」标签带**重绘时刻**：这版组件只能整图重建，标签天然落后于顶部实时价。
-    # 写明 "最新 80365.00 @ 09:05:12"（上次重绘的那一刻 + 那一刻的价格），
-    # 两个数字对不上时一眼能看出是刷新节奏，而不是以为算错了。
-    asof_key = f"_chart_asof_{ctx['symbol']}_{ctx['interval']}"
-    if force_reinit or asof_key not in st.session_state:
-        st.session_state[asof_key] = datetime.now().strftime("%H:%M:%S")
-    price_title = f"最新 {float(last['c']):,.2f} @ {st.session_state[asof_key]}"
+    # 只有「标的/周期/指标结构」变化才需要重新 fitContent；单纯价格变化不动视口。
+    reset_view = _chart_should_reinit(
+        f"lwc-live-{ctx['symbol']}-{ctx['interval']}", signature, min_interval=0.0
+    )
+    price_title = f"最新 {float(last['c']):,.2f}"
 
-    if not render_lwc_candles(
-        candles=candles,
-        levels=levels,
-        lines=lines,
-        interval=ctx["interval"],
-        height=height,
-        # key 必须稳定：LWC 靠它保存 series 配置，否则 2 秒刷新会把缩放弹回默认
-        key=f"live-{ctx['symbol']}-{ctx['interval']}-{strategy}",
-        overlay_lines=overlays,
-        sub_panes=panes,
-        force_reinit=force_reinit,
-        price_title=price_title,
-    ):
-        st.warning("当前没有可渲染的 K 线数据。", icon="📉")
-    else:
+    if candles:
+        lwc_render(
+            lwc_payload(
+                candles,
+                height=height,
+                overlays=overlays,
+                panes=panes,
+                price_line={"price": float(last["c"]), "title": price_title},
+                reset_view=reset_view,
+            ),
+            key=f"lwc-live-{ctx['symbol']}-{ctx['interval']}-{strategy}",
+            height=height,
+        )
         render_candle_inspector(candles, ctx["symbol"], ctx["interval"])
+    else:
+        st.warning("当前没有可渲染的 K 线数据。", icon="📉")
 
     with st.expander("🩺 数据源详情", expanded=False):
         if ctx["offline"]:
