@@ -18,6 +18,9 @@ let overlaySeries = [];       // [{series, key}]
 let lastCandles = [];
 let lastVolume = [];
 let paneSeries = {};
+let lineSeries = {};
+let lastLineSig = "";
+let refHandles = [];
 let lastPaneSig = "";         // 上一帧数据，用于增量 diff
 let lastOverlaySig = "";
 let markerApi = null;
@@ -77,6 +80,9 @@ function ensureChart(height) {
   overlaySeries = [];
   paneSeries = {};
   lastPaneSig = "";
+  lineSeries = {};
+  lastLineSig = "";
+  refHandles = [];
   if (markerApi) { markerApi.detach?.(); markerApi = null; }
 }
 
@@ -214,6 +220,68 @@ function applyPanes(panes) {
   });
 }
 
+
+/* 纯折线/面积图：净值、策略对比、情绪曲线。
+ * 与 K 线图共用同一个实例：pane 0 起，不涉及蜡烛与成交量。 */
+function applyLineSeries(specs) {
+  const sig = JSON.stringify((specs || []).map((s) => [s.key, s.type, s.pane, s.color]));
+  if (sig !== lastLineSig) {
+    Object.values(lineSeries).forEach((series) => {
+      try { chart.removeSeries(series); } catch (e) { /* 已销毁 */ }
+    });
+    lineSeries = {};
+    lastLineSig = sig;
+  }
+  (specs || []).forEach((spec, i) => {
+    const key = spec.key || `line${i}`;
+    let series = lineSeries[key];
+    if (!series) {
+      if (spec.type === "area") {
+        series = chart.addSeries(LWC.AreaSeries, {
+          lineColor: spec.color || "#ef5350",
+          topColor: spec.fill || "rgba(239,83,80,0.25)",
+          bottomColor: spec.fillBottom || "rgba(239,83,80,0.02)",
+          lineWidth: spec.width || 2,
+          lastValueVisible: false,
+          priceLineVisible: false,
+        }, spec.pane || 0);
+      } else {
+        series = chart.addSeries(LWC.LineSeries, {
+          color: spec.color || "#4fc3f7",
+          lineWidth: spec.width || 2,
+          lastValueVisible: false,
+          priceLineVisible: false,
+        }, spec.pane || 0);
+      }
+      lineSeries[key] = series;
+    }
+    series.setData(spec.points || []);
+  });
+}
+
+function applyRefLines(specs, resetView) {
+  refHandles.forEach((h) => {
+    try { h.series.removePriceLine(h.handle); } catch (e) { /* 忽略 */ }
+  });
+  refHandles = [];
+  const target = Object.values(lineSeries)[0];
+  if (!target) return;
+  (specs || []).forEach((spec) => {
+    refHandles.push({
+      series: target,
+      handle: target.createPriceLine({
+        price: spec.price,
+        color: spec.color || "rgba(0,0,0,0.35)",
+        lineWidth: 1,
+        lineStyle: LWC.LineStyle.Dotted,
+        axisLabelVisible: true,
+        title: spec.title || "",
+      }),
+    });
+  });
+  if (resetView) chart.timeScale().fitContent();
+}
+
 function applyExtraPriceLines(specs) {
   (applyExtraPriceLines.handles || []).forEach((h) => {
     try { candleSeries.removePriceLine(h); } catch (e) { /* 忽略 */ }
@@ -256,6 +324,12 @@ function render(args) {
   const cfg = (args && args.config) || {};
   ensureChart(cfg.height);
   const resetView = Boolean(cfg.resetView);
+  if (!(cfg.candles && cfg.candles.length)) {
+    applyLineSeries(cfg.lineSeries || []);
+    applyRefLines(cfg.refLines || [], resetView);
+    setHeight(cfg.height || 420);
+    return;
+  }
   applyCandles(cfg.candles || [], resetView || lastCandles.length === 0);
   applyVolume(cfg.volume || [], resetView || lastCandles.length === 0);
   applyOverlays(cfg.overlays || []);
