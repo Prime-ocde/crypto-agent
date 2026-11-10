@@ -17,7 +17,8 @@ from typing import Any, Iterable
 
 import streamlit.components.v1 as components
 
-from frontend.charts import _chart_time, _finite, clean_rows
+from frontend.series import chart_time as _chart_time
+from frontend.series import clean_rows, finite as _finite
 
 _COMPONENT_DIR = Path(__file__).parent / "lwc_component"
 _component = components.declare_component("lwc_min", path=str(_COMPONENT_DIR))
@@ -173,3 +174,61 @@ def build_payload(
 def render(payload: dict, key: str, height: int | None = None) -> Any:
     """渲染组件；`key` 必须稳定，否则会重建 iframe（但图表本身不会被重建）。"""
     return _component(config=payload, height=height or payload.get("height", 520), key=key, default=None)
+
+
+def build_lines_payload(
+    series: Iterable[dict],
+    *,
+    height: int = 420,
+    reset_view: bool = False,
+    reference_lines: Iterable[dict] | None = None,
+) -> dict:
+    """纯折线/面积图（净值+回撤、策略对比、情绪曲线）。
+
+    `series` 每项：`{"key","color","width","pane","type":"line|area","fill","fill_bottom","points":[[ms, value]]}`。
+    """
+    line_payload: list[dict] = []
+    for spec in series or []:
+        points = []
+        for point in spec.get("points") or []:
+            ts = _chart_time(point[0])
+            value = _finite(point[1])
+            if ts is None or value is None:
+                continue
+            points.append({"time": ts, "value": value})
+        if not points:
+            continue
+        line_payload.append(
+            {
+                "key": spec.get("key") or spec.get("name", ""),
+                "color": spec.get("color", "#4fc3f7"),
+                "width": int(spec.get("width", 2)),
+                "pane": int(spec.get("pane", 0)),
+                "type": spec.get("type", "line"),
+                "fill": spec.get("fill"),
+                "fillBottom": spec.get("fill_bottom"),
+                "points": points,
+            }
+        )
+
+    ref_payload = []
+    for spec in reference_lines or []:
+        try:
+            price = float(spec.get("price") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        ref_payload.append(
+            {
+                "price": price,
+                "color": spec.get("color", "rgba(0,0,0,0.35)"),
+                "title": spec.get("title", ""),
+            }
+        )
+
+    return {
+        "height": int(height),
+        "resetView": bool(reset_view),
+        "candles": [],
+        "lineSeries": line_payload,
+        "refLines": ref_payload,
+    }
