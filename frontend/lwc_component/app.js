@@ -16,7 +16,9 @@ let candleSeries = null;
 let volumeSeries = null;
 let overlaySeries = [];       // [{series, key}]
 let lastCandles = [];
-let lastVolume = [];         // 上一帧数据，用于增量 diff
+let lastVolume = [];
+let paneSeries = {};
+let lastPaneSig = "";         // 上一帧数据，用于增量 diff
 let lastOverlaySig = "";
 let markerApi = null;
 
@@ -73,6 +75,8 @@ function ensureChart(height) {
   lastVolume = [];
   lastOverlaySig = "";
   overlaySeries = [];
+  paneSeries = {};
+  lastPaneSig = "";
   if (markerApi) { markerApi.detach?.(); markerApi = null; }
 }
 
@@ -166,6 +170,66 @@ function applyOverlays(overlays) {
   });
 }
 
+/* 指标副图：pane 0 是 K 线（含成交量叠加），指标从 pane 1 开始。
+ * 结构不变时只 setData（不会触发 fitContent，视口保持）；结构变了才重建这些 series。 */
+function applyPanes(panes) {
+  const spec = panes || [];
+  const sig = JSON.stringify(
+    spec.map((p) => [p.index, Boolean(p.hist), (p.lines || []).map((l) => [l.key, l.color])]),
+  );
+  const rebuild = sig !== lastPaneSig;
+  if (rebuild) {
+    Object.values(paneSeries).forEach((series) => {
+      try { chart.removeSeries(series); } catch (e) { /* 已随 pane 销毁 */ }
+    });
+    paneSeries = {};
+    lastPaneSig = sig;
+  }
+  spec.forEach((p) => {
+    const idx = p.index;
+    const scaleId = `pane${idx}`;
+    if (p.hist) {
+      let series = paneSeries[`${idx}-hist`];
+      if (!series) {
+        series = chart.addSeries(LWC.HistogramSeries, {
+          priceScaleId: scaleId, lastValueVisible: false, priceLineVisible: false,
+        }, idx);
+        paneSeries[`${idx}-hist`] = series;
+      }
+      series.setData(p.hist.points || []);
+    }
+    (p.lines || []).forEach((line, i) => {
+      const key = `${idx}-line${i}`;
+      let series = paneSeries[key];
+      if (!series) {
+        series = chart.addSeries(LWC.LineSeries, {
+          color: line.color || "#ffb74d", lineWidth: line.width || 1,
+          lastValueVisible: false, priceLineVisible: false,
+        }, idx);
+        paneSeries[key] = series;
+      }
+      series.applyOptions({ color: line.color || "#ffb74d", lineWidth: line.width || 1 });
+      series.setData(line.points || []);
+    });
+  });
+}
+
+function applyExtraPriceLines(specs) {
+  (applyExtraPriceLines.handles || []).forEach((h) => {
+    try { candleSeries.removePriceLine(h); } catch (e) { /* 忽略 */ }
+  });
+  applyExtraPriceLines.handles = (specs || []).map((spec) =>
+    candleSeries.createPriceLine({
+      price: spec.price,
+      color: spec.color || "rgba(79,195,247,0.45)",
+      lineWidth: 1,
+      lineStyle: LWC.LineStyle.Dashed,
+      axisLabelVisible: false,
+      title: spec.title || "",
+    }),
+  );
+}
+
 function applyPriceLine(spec) {
   if (!spec || !spec.price) return;
   if (applyPriceLine.handle) {
@@ -195,7 +259,9 @@ function render(args) {
   applyCandles(cfg.candles || [], resetView || lastCandles.length === 0);
   applyVolume(cfg.volume || [], resetView || lastCandles.length === 0);
   applyOverlays(cfg.overlays || []);
+  applyPanes(cfg.panes || []);
   applyPriceLine(cfg.priceLine);
+  applyExtraPriceLines(cfg.priceLines || []);
   applyMarkers(cfg.markers || []);
   lastHeight = 0; // 高度由 render 决定，强制刷新一次
   setHeight(cfg.height || 520);
